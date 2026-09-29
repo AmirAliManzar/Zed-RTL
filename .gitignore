@@ -1,0 +1,4 @@
+artifacts/
+work/
+*.user-data-dir/
+*.patch.user

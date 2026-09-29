@@ -1,0 +1,179 @@
+diff --git a/crates/gpui_windows/src/direct_write.rs b/crates/gpui_windows/src/direct_write.rs
+index 08ae7a998f..a4d9cd5b9c 100644
+--- a/crates/gpui_windows/src/direct_write.rs
++++ b/crates/gpui_windows/src/direct_write.rs
+@@ -613,6 +613,7 @@ impl DirectWriteState {
+                 components,
+                 index_converter: StringIndexConverter::new(text),
+                 runs: &mut runs,
++                run_meta: Vec::new(),
+                 width: 0.0,
+             };
+             text_layout.Draw(
+@@ -622,6 +623,51 @@ impl DirectWriteState {
+                 0.0,
+             )?;
+             let width = px(renderer_context.width);
++            let run_meta = renderer_context.run_meta.clone();
++
++            // Unicode bidi rule L2: convert the run sequence from logical
++            // order (as DirectWrite reports it) to visual order whenever RTL
++            // (odd-level) runs are present. Contiguous runs at each level are
++            // reversed, from the highest level down. Purely-LTR lines contain
++            // no odd levels and are left completely untouched.
++            if run_meta.iter().any(|(lvl, _, _)| *lvl & 1 == 1) && runs.len() > 1 {
++                let max_level = run_meta.iter().map(|(lvl, _, _)| *lvl).max().unwrap();
++                let mut order: Vec<usize> = (0..runs.len()).collect();
++                for level in (1..=max_level).rev() {
++                    let mut i = 0;
++                    while i < order.len() {
++                        if run_meta[order[i]].0 >= level {
++                            let mut j = i;
++                            while j < order.len() && run_meta[order[j]].0 >= level {
++                                j += 1;
++                            }
++                            order[i..j].reverse();
++                            i = j;
++                        } else {
++                            i += 1;
++                        }
++                    }
++                }
++
++                // Reassign left-to-right positions along the visual order,
++                // shifting each run's glyphs from their logical placement.
++                let mut x = 0.0f32;
++                let mut logical: Vec<Option<ShapedRun>> =
++                    runs.drain(..).map(Some).collect();
++                for &run_ix in &order {
++                    let (_, old_start, old_end) = run_meta[run_ix];
++                    let shift = x - old_start;
++                    let mut run = logical[run_ix].take().unwrap();
++                    if shift != 0.0 {
++                        for glyph in &mut run.glyphs {
++                            glyph.position.x =
++                                px(glyph.position.x.as_f32() + shift);
++                        }
++                    }
++                    runs.push(run);
++                    x += old_end - old_start;
++                }
++            }
+ 
+             Ok(LineLayout {
+                 font_size,
+@@ -1372,6 +1418,8 @@ struct RendererContext<'t, 'a, 'b> {
+     components: &'a DirectWriteComponents,
+     index_converter: StringIndexConverter<'a>,
+     runs: &'b mut Vec<ShapedRun>,
++    /// Per-run metadata captured during shaping: (bidi_level, start_x, end_x).
++    run_meta: Vec<(u32, f32, f32)>,
+     width: f32,
+ }
+ 
+@@ -1483,6 +1531,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+         if glyph_count == 0 {
+             return Ok(());
+         }
++
++        // Detect RTL runs via bidi level (odd = RTL)
++        let is_rtl = (glyphrun.bidiLevel & 1) == 1;
++
+         let desc = unsafe { &*glyphrundescription };
+         let context = unsafe { &mut *(clientdrawingcontext.cast::<RendererContext>().cast_mut()) };
+         let Some(font_face) = glyphrun.fontFace.as_ref() else {
+@@ -1503,10 +1555,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+             .font_info_cache
+             .get(&font_face_key)
+             .copied()
+-            // in some circumstances, we might be getting served a FontFace that we did not create ourselves
+-            // so create a new font from it and cache it accordingly. The usual culprit here seems to be Segoe UI Symbol
+             .map_or_else(
+                 || {
++                    // in some circumstances, we might be getting served a FontFace that we did not create ourselves
++                    // so create a new font from it and cache it accordingly. The usual culprit here seems to be Segoe UI Symbol
+                     let font = font_face_to_font(font_face, &self.locale)
+                         .ok_or_else(|| Error::new(DWRITE_E_NOFONT, "Failed to create font"))?;
+                     let font_id = match context.text_system.font_to_font_id.get(&font) {
+@@ -1559,7 +1611,21 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+         let cluster_analyzer = ClusterAnalyzer::new(cluster_map, glyph_count);
+         let mut utf16_idx = desc.textPosition as usize;
+         let mut glyph_idx = 0;
+-        let mut glyphs = Vec::with_capacity(glyph_count);
++
++        // Temporary storage: collect glyph data first, assign positions after.
++        // This allows us to reverse glyph order for RTL runs.
++        struct TempGlyph {
++            id: GlyphId,
++            index: usize,
++            is_emoji: bool,
++            advance: f32,
++            advance_offset: f32,
++            ascender_offset: f32,
++        }
++
++        let mut temp_glyphs: Vec<TempGlyph> = Vec::with_capacity(glyph_count);
++        let run_start_x = context.width;
++
+         for (cluster_utf16_len, cluster_glyph_count) in cluster_analyzer {
+             context.index_converter.advance_to_utf16_ix(utf16_idx);
+             utf16_idx += cluster_utf16_len;
+@@ -1572,20 +1638,53 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+                 let is_emoji =
+                     color_font && is_color_glyph(font_face, id, &context.components.factory);
+                 let this_glyph_idx = glyph_idx + cluster_glyph_idx;
+-                glyphs.push(ShapedGlyph {
++                temp_glyphs.push(TempGlyph {
+                     id,
+-                    position: point(
+-                        px(context.width + glyph_offsets[this_glyph_idx].advanceOffset),
+-                        px(-glyph_offsets[this_glyph_idx].ascenderOffset),
+-                    ),
+                     index: context.index_converter.utf8_ix,
+                     is_emoji,
++                    advance: glyph_advances[this_glyph_idx],
++                    advance_offset: glyph_offsets[this_glyph_idx].advanceOffset,
++                    ascender_offset: glyph_offsets[this_glyph_idx].ascenderOffset,
+                 });
+                 context.width += glyph_advances[this_glyph_idx];
+             }
+             glyph_idx += cluster_glyph_count;
+         }
++
++        // For RTL runs, DirectWrite returns glyphs in logical order; sort by
++        // descending source index to obtain their visual (left-to-right) order.
++        if is_rtl {
++            temp_glyphs.sort_by_key(|t| std::cmp::Reverse(t.index));
++        }
++
++        // Assign final positions, placing glyphs left-to-right
++        let mut x = run_start_x;
++        let glyphs: Vec<ShapedGlyph> = temp_glyphs
++            .into_iter()
++            .map(|t| {
++                // For RTL, negate advance_offset: the original offset was along
++                // the RTL advance direction (leftward), but after reversal we
++                // place glyphs leftward-to-rightward, so the offset must flip.
++                let offset_x = if is_rtl { -t.advance_offset } else { t.advance_offset };
++                let glyph = ShapedGlyph {
++                    id: t.id,
++                    position: point(
++                        px(x + offset_x),
++                        px(-t.ascender_offset),
++                    ),
++                    index: t.index,
++                    is_emoji: t.is_emoji,
++                };
++                x += t.advance;
++                glyph
++            })
++            .collect();
++
+         context.runs.push(ShapedRun { font_id, glyphs });
++        // Record (bidi_level, start_x, end_x) for Unicode L2 reordering.
++        context
++            .run_meta
++            .push((glyphrun.bidiLevel, run_start_x, context.width));
+         Ok(())
+     }
+ 

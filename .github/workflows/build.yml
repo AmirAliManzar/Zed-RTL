@@ -1,0 +1,80 @@
+name: Build (Windows x64)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Upstream Zed ref (tag/SHA) to build instead of UPSTREAM_REF'
+        required: false
+
+permissions:
+  contents: write      # needed to publish releases / upload assets
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two runner images verify the build works across current Windows toolchains.
+        # The produced x86_64 exe is portable to any Windows 10/11 x64 machine.
+        os: [ windows-2022, windows-2025 ]
+
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - name: Checkout this repo (patch + scripts)
+        uses: actions/checkout@v4
+
+      # Rust itself is preinstalled on GitHub's windows runners; the build
+      # script installs the exact channel pinned by upstream's
+      # rust-toolchain.toml (ref-agnostic).
+      - name: Cache cargo registry & git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ matrix.os }}-v2
+          restore-keys: cargo-${{ matrix.os }}-v2
+
+      - name: Build patched Zed
+        shell: pwsh
+        run: |
+          $buildArgs = @("./scripts/build.patched.ps1")
+          if ("${{ github.event.inputs.upstream_ref }}") { $buildArgs += "-UpstreamRef", "${{ github.event.inputs.upstream_ref }}" }
+          & Powershell -ExecutionPolicy Bypass -File @buildArgs
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-rtl-${{ matrix.os }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Publish to GitHub Releases (single runner to avoid races)
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = if ($env:GITHUB_REF -match '^refs/tags/(.+)$') { $matches[1] } else { "rolling" }
+          Write-Host "Publishing to release: $tag"
+          if ($tag -eq 'rolling') {
+            $notes = "Automatic build of main @ ${{ github.sha }}`nBuilt: $(Get-Date -Format 'yyyy-MM-dd HH:mm UTC')"
+            gh release create rolling --title "Rolling build (auto)" --notes $notes --prerelease 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              gh release edit rolling --notes $notes 2>$null
+            }
+          } else {
+            gh release create "$tag" --verify-tag --generate-notes 2>$null
+          }
+          gh release upload "$tag" artifacts/* --clobber

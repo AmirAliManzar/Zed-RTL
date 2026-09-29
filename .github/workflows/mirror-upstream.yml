@@ -1,0 +1,49 @@
+name: Track upstream
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'   # every Monday 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream Zed ref (tag or SHA) to track and build'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Resolve latest upstream release tag
+        id: resolve
+        run: |
+          ref="${{ inputs.ref }}"
+          if [ -z "$ref" ]; then
+            ref=$(curl -fsSL 'https://api.github.com/repos/zed-industries/zed/tags?per_page=100' \
+              | jq -r '.[].name' \
+              | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -1)
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream ref: $ref"
+
+      - name: Update UPSTREAM_REF and trigger a build
+        env:
+          TARGET: ${{ steps.resolve.outputs.ref }}
+        run: |
+          current=$(tr -d '[:space:]' < UPSTREAM_REF)
+          echo "current=$current target=$TARGET"
+          if [ -z "$TARGET" ]; then echo "no target resolved"; exit 0; fi
+          if [ "$current" = "$TARGET" ]; then echo "already tracking $TARGET"; exit 0; fi
+          echo "$TARGET" > UPSTREAM_REF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Track upstream $TARGET"
+          git push
+          echo "Pushed - the Build workflow will now build $TARGET."
+          echo "NOTE: if the patch no longer applies, the Build workflow fails; refresh patch/zed-rtl.patch."
