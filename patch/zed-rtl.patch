@@ -1,10 +1,72 @@
-warning: in the working copy of 'crates/gpui/src/text_system/line_layout.rs', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'crates/gpui_windows/src/direct_write.rs', LF will be replaced by CRLF the next time Git touches it
+diff --git a/crates/gpui/src/platform.rs b/crates/gpui/src/platform.rs
+index f3d3c05499..a54638eb2e 100644
+--- a/crates/gpui/src/platform.rs
++++ b/crates/gpui/src/platform.rs
+@@ -1314,6 +1314,7 @@ impl PlatformTextSystem for NoopTextSystem {
+             runs.push(ShapedRun {
+                 font_id: FontId(0),
+                 glyphs,
++                is_rtl: false,
+             });
+         } else {
+             position = px(0.);
+diff --git a/crates/gpui/src/text_system/line.rs b/crates/gpui/src/text_system/line.rs
+index a96cec3c99..bb6c3b453f 100644
+--- a/crates/gpui/src/text_system/line.rs
++++ b/crates/gpui/src/text_system/line.rs
+@@ -297,6 +297,7 @@ impl<'a> ShapedLineCursor<'a> {
+                             is_emoji: glyph.is_emoji,
+                         })
+                         .collect(),
++                    is_rtl: run.is_rtl,
+                 });
+             }
+             if let Some(glyph) = run.glyphs.get(self.glyph_index) {
+@@ -939,6 +940,7 @@ mod tests {
+                 runs: vec![ShapedRun {
+                     font_id: FontId(0),
+                     glyphs: shaped_glyphs,
++                    is_rtl: false,
+                 }],
+                 len: text.len(),
+             }),
+@@ -1033,6 +1035,7 @@ mod tests {
+                                 is_emoji: false,
+                             },
+                         ],
++                        is_rtl: false,
+                     },
+                     ShapedRun {
+                         font_id: FontId(1),
+@@ -1056,6 +1059,7 @@ mod tests {
+                                 is_emoji: false,
+                             },
+                         ],
++                        is_rtl: false,
+                     },
+                 ],
+                 len: 6,
+@@ -1202,6 +1206,7 @@ mod tests {
+                                 is_emoji: false,
+                             },
+                         ],
++                        is_rtl: false,
+                     },
+                     ShapedRun {
+                         font_id: FontId(8),
+@@ -1219,6 +1224,7 @@ mod tests {
+                                 is_emoji: false,
+                             },
+                         ],
++                        is_rtl: false,
+                     },
+                 ],
+                 len: 10,
 diff --git a/crates/gpui/src/text_system/line_layout.rs b/crates/gpui/src/text_system/line_layout.rs
-index 5e85cefb8c..5a124cb0cc 100644
+index 7799b36dc8..8be48af2e5 100644
 --- a/crates/gpui/src/text_system/line_layout.rs
 +++ b/crates/gpui/src/text_system/line_layout.rs
-@@ -33,10 +33,19 @@ pub struct LineLayout {
+@@ -36,8 +36,13 @@ pub struct LineLayout {
  pub struct ShapedRun {
      /// The font id for this run
      pub font_id: FontId,
@@ -12,20 +74,14 @@ index 5e85cefb8c..5a124cb0cc 100644
 +    /// The glyphs that make up this run, in the order they are painted.
 +    /// For RTL runs this is *visual* order (i.e. descending source index).
      pub glyphs: Vec<ShapedGlyph>,
++    /// Whether this run is right-to-left. The shaper knows the bidi level of
++    /// each run and records it here, so single-glyph RTL runs (e.g. one
++    /// Persian letter embedded in English text) are classified correctly.
++    pub is_rtl: bool,
  }
  
-+/// Returns whether a run is right-to-left, inferred from its glyphs: the
-+/// Windows shaper stores RTL runs in visual order (descending source index),
-+/// while LTR runs are stored in ascending index order. Single-glyph runs are
-+/// treated as LTR (their direction does not affect within-run caret math).
-+fn is_rtl_run(glyphs: &[ShapedGlyph]) -> bool {
-+    glyphs.windows(2).any(|pair| pair[0].index > pair[1].index)
-+}
-+
  /// A single glyph, ready to paint.
- #[derive(Clone, Debug)]
- pub struct ShapedGlyph {
-@@ -53,41 +62,172 @@ pub struct ShapedGlyph {
+@@ -56,41 +61,215 @@ pub struct ShapedGlyph {
      pub is_emoji: bool,
  }
  
@@ -78,40 +134,83 @@ index 5e85cefb8c..5a124cb0cc 100644
 +                .get(run_ix + 1)
 +                .and_then(|next| next.glyphs.iter().map(|g| g.position.x).min())
 +                .unwrap_or(self.width);
++            // Visual left edge of this run.
++            let run_left_x = run
++                .glyphs
++                .iter()
++                .map(|g| g.position.x)
++                .min()
++                .unwrap_or(px(0.));
 +
-+            // Glyphs in ascending logical index order.
-+            let mut logical: Vec<&ShapedGlyph> = run.glyphs.iter().collect();
-+            logical.sort_by_key(|g| g.index);
++            // Group glyphs into *clusters*: glyphs that share a source index
++            // (a base character with its combining marks, or a ligature) are
++            // one cluster. A cluster is a single caret cell: the caret never
++            // stops between its glyphs. Clusters are contiguous in the stored
++            // (visual) order, and their left edge is the smallest glyph x.
++            let mut clusters: Vec<CaretStop> = Vec::new();
++            for glyph in &run.glyphs {
++                if let Some(last) = clusters.last_mut() {
++                    if last.index == glyph.index {
++                        if glyph.position.x < last.x {
++                            last.x = glyph.position.x;
++                        }
++                        continue;
++                    }
++                }
++                clusters.push(CaretStop {
++                    index: glyph.index,
++                    x: glyph.position.x,
++                    is_rtl: run.is_rtl,
++                });
++            }
++            // Clusters in ascending source-index order.
++            clusters.sort_by_key(|cluster| cluster.index);
 +
-+            let is_rtl = is_rtl_run(&run.glyphs);
-+            if is_rtl {
-+                // Caret before the first character is at the run's right edge.
++            if run.is_rtl {
++                // The caret before the run's first character: when the run
++                // starts the line this is the run's right edge (RTL reading
++                // begins on the right); when another run precedes it, it is
++                // the boundary with that run, at this run's left edge.
++                let before_x = if run_ix > 0 { run_left_x } else { run_right_x };
 +                stops.push(CaretStop {
 +                    index: min_ix,
-+                    x: run_right_x,
-+                    is_rtl,
++                    x: before_x,
++                    is_rtl: true,
 +                });
-+                for k in 0..logical.len() {
++                for k in 0..clusters.len() {
 +                    // The caret just *after* this character sits at this
-+                    // glyph's left edge; its byte index is the start of the
-+                    // next logical character (or the run's end for the last).
-+                    let after = if k + 1 < logical.len() {
-+                        logical[k + 1].index
++                    // cluster's left edge (the next logical character is
++                    // visually to its left); its byte index is the start of
++                    // the next logical character (or the run's end for the
++                    // last).
++                    let after = if k + 1 < clusters.len() {
++                        clusters[k + 1].index
 +                    } else {
 +                        run_end
 +                    };
++                    // For the run's last character the caret is at the run's
++                    // right edge — the boundary with the following run — when
++                    // one follows, and at the run's left edge otherwise (RTL
++                    // text ends on the left).
++                    let after_x = if k + 1 < clusters.len() {
++                        clusters[k].x
++                    } else if run_ix + 1 < self.runs.len() {
++                        run_right_x
++                    } else {
++                        clusters[k].x
++                    };
 +                    stops.push(CaretStop {
 +                        index: after,
-+                        x: logical[k].position.x,
-+                        is_rtl,
++                        x: after_x,
++                        is_rtl: true,
 +                    });
 +                }
 +            } else {
-+                for glyph in &logical {
++                for cluster in &clusters {
 +                    stops.push(CaretStop {
-+                        index: glyph.index,
-+                        x: glyph.position.x,
-+                        is_rtl,
++                        index: cluster.index,
++                        x: cluster.x,
++                        is_rtl: false,
 +                    });
 +                }
 +                // Caret after the run's last character is at the run's right
@@ -119,7 +218,7 @@ index 5e85cefb8c..5a124cb0cc 100644
 +                stops.push(CaretStop {
 +                    index: run_end,
 +                    x: run_right_x,
-+                    is_rtl,
++                    is_rtl: false,
 +                });
 +            }
 +        }
@@ -139,17 +238,16 @@ index 5e85cefb8c..5a124cb0cc 100644
 +            // Fast path: when no run is RTL (common case), glyphs are stored
 +            // in logical order with ascending x, so the original reverse scan
 +            // is correct.
-+            if self.runs.iter().all(|r| !is_rtl_run(&r.glyphs)) {
++            if self.runs.iter().all(|r| !r.is_rtl) {
 +                for run in self.runs.iter().rev() {
 +                    for glyph in run.glyphs.iter().rev() {
 +                        if glyph.position.x <= x {
 +                            return Some(glyph.index);
 +                        }
-                     }
-                 }
++                    }
++                }
 +                return Some(0);
-             }
--            Some(0)
++            }
 +            // RTL present: the caret stop with the greatest x that is <= the
 +            // click point is the boundary the user clicked on.
 +            let mut best: Option<(Pixels, usize)> = None;
@@ -158,9 +256,10 @@ index 5e85cefb8c..5a124cb0cc 100644
 +                    match best {
 +                        Some((best_x, _)) if stop.x < best_x => {}
 +                        _ => best = Some((stop.x, stop.index)),
-+                    }
-+                }
-+            }
+                     }
+                 }
+             }
+-            Some(0)
 +            best.map(|(_, index)| index).or(Some(0))
          }
      }
@@ -179,7 +278,7 @@ index 5e85cefb8c..5a124cb0cc 100644
 -                    } else {
 -                        return prev_index;
 +        // Fast path: no RTL runs → glyphs stored in logical/x-ascending order.
-+        if self.runs.iter().all(|r| !is_rtl_run(&r.glyphs)) {
++        if self.runs.iter().all(|r| !r.is_rtl) {
 +            let mut prev_index = 0;
 +            let mut prev_x = px(0.);
 +            for run in &self.runs {
@@ -193,10 +292,8 @@ index 5e85cefb8c..5a124cb0cc 100644
                      }
 +                    prev_index = glyph.index;
 +                    prev_x = glyph.position.x;
-                 }
--                prev_index = glyph.index;
--                prev_x = glyph.position.x;
-             }
++                }
++            }
 +        } else {
 +            // RTL present: pick the caret stop nearest to x, preferring the
 +            // smaller x on exact ties (matching the LTR behaviour above).
@@ -209,13 +306,15 @@ index 5e85cefb8c..5a124cb0cc 100644
 +                    best_dist = dist;
 +                    best_index = stop.index;
 +                    best_x = stop.x;
-+                }
-+            }
+                 }
+-                prev_index = glyph.index;
+-                prev_x = glyph.position.x;
+             }
 +            return best_index;
          }
  
          if self.len == 1 {
-@@ -103,24 +243,61 @@ impl LineLayout {
+@@ -106,24 +285,61 @@ impl LineLayout {
  
      /// The x position of the character at the given index
      pub fn x_for_index(&self, index: usize) -> Pixels {
@@ -225,7 +324,7 @@ index 5e85cefb8c..5a124cb0cc 100644
 -                    return glyph.position.x;
 +        // Fast path: no RTL runs → glyphs in logical order, first glyph with
 +        // index >= target is the answer.
-+        if self.runs.iter().all(|r| !is_rtl_run(&r.glyphs)) {
++        if self.runs.iter().all(|r| !r.is_rtl) {
 +            for run in &self.runs {
 +                for glyph in &run.glyphs {
 +                    if glyph.index >= index {
@@ -251,7 +350,7 @@ index 5e85cefb8c..5a124cb0cc 100644
 -            for glyph in &run.glyphs {
 -                if glyph.index >= index {
 -                    return Some(run.font_id);
-+        if self.runs.iter().all(|r| !is_rtl_run(&r.glyphs)) {
++        if self.runs.iter().all(|r| !r.is_rtl) {
 +            for run in &self.runs {
 +                for glyph in &run.glyphs {
 +                    if glyph.index >= index {
@@ -285,7 +384,31 @@ index 5e85cefb8c..5a124cb0cc 100644
          }
          None
      }
-@@ -993,6 +1170,171 @@ mod tests {
+@@ -149,6 +365,7 @@ impl LineLayout {
+                 left_runs.push(ShapedRun {
+                     font_id: run.font_id,
+                     glyphs: run.glyphs[..split_pos].to_vec(),
++                    is_rtl: run.is_rtl,
+                 });
+             }
+ 
+@@ -165,6 +382,7 @@ impl LineLayout {
+                 right_runs.push(ShapedRun {
+                     font_id: run.font_id,
+                     glyphs: right_glyphs,
++                    is_rtl: run.is_rtl,
+                 });
+             }
+         }
+@@ -1091,6 +1309,7 @@ mod tests {
+             runs: vec![ShapedRun {
+                 font_id: FontId(0),
+                 glyphs,
++                is_rtl: false,
+             }],
+             len: 0,
+         }
+@@ -1104,6 +1323,255 @@ mod tests {
              .collect()
      }
  
@@ -293,6 +416,15 @@ index 5e85cefb8c..5a124cb0cc 100644
 +        ShapedRun {
 +            font_id: FontId(font_ix),
 +            glyphs,
++            is_rtl: false,
++        }
++    }
++
++    fn make_rtl_run(font_ix: usize, glyphs: Vec<ShapedGlyph>) -> ShapedRun {
++        ShapedRun {
++            font_id: FontId(font_ix),
++            glyphs,
++            is_rtl: true,
 +        }
 +    }
 +
@@ -340,7 +472,7 @@ index 5e85cefb8c..5a124cb0cc 100644
 +        // stores glyphs in visual order (descending index), each 10px wide:
 +        // م(6)@0, ا(4)@10, ل(2)@20, س(0)@30; line width 40.
 +        let layout = make_layout_runs(
-+            vec![make_run(
++            vec![make_rtl_run(
 +                0,
 +                vec![
 +                    glyph_at(0., 6),
@@ -388,7 +520,7 @@ index 5e85cefb8c..5a124cb0cc 100644
 +                        glyph_at(30., 3),
 +                    ],
 +                ),
-+                make_run(
++                make_rtl_run(
 +                    0,
 +                    vec![
 +                        glyph_at(40., 10),
@@ -418,7 +550,7 @@ index 5e85cefb8c..5a124cb0cc 100644
 +        // space=8,h=9,e=10,l=11,l=12,o=13 (LTR run at [40,100)); width 100.
 +        let layout = make_layout_runs(
 +            vec![
-+                make_run(
++                make_rtl_run(
 +                    0,
 +                    vec![
 +                        glyph_at(0., 6),
@@ -454,11 +586,146 @@ index 5e85cefb8c..5a124cb0cc 100644
 +        assert_eq!(f32::from(layout.x_for_index(14)), 100.);
 +    }
 +
++    #[test]
++    fn test_caret_single_glyph_rtl_run() {
++        // "aبb": a=0 (1 byte), ب=1 (2 bytes, single-glyph RTL run), b=3.
++        // Runs are stored in visual order: [a @0][ب @10][b @20]; width 30.
++        // A single-glyph RTL run has no internal index descent, so its
++        // direction must come from the shaper's bidi level (is_rtl), not
++        // from inference.
++        let layout = make_layout_runs(
++            vec![
++                make_run(0, vec![glyph_at(0., 0)]),
++                make_rtl_run(0, vec![glyph_at(10., 1)]),
++                make_run(0, vec![glyph_at(20., 3)]),
++            ],
++            30.,
++            4,
++        );
++        // Boundaries fall exactly on the Persian letter's edges, as in VS Code.
++        assert_eq!(f32::from(layout.x_for_index(0)), 0.);
++        assert_eq!(f32::from(layout.x_for_index(1)), 10.);
++        assert_eq!(f32::from(layout.x_for_index(3)), 20.);
++        assert_eq!(f32::from(layout.x_for_index(4)), 30.);
++        assert_eq!(layout.index_for_x(px(5.)), Some(0));
++        assert_eq!(layout.index_for_x(px(15.)), Some(1));
++        assert_eq!(layout.index_for_x(px(25.)), Some(3));
++        assert_eq!(layout.index_for_x(px(30.)), None);
++        assert_eq!(layout.closest_index_for_x(px(5.)), 0);
++        assert_eq!(layout.closest_index_for_x(px(15.)), 1);
++        assert_eq!(layout.closest_index_for_x(px(25.)), 3);
++    }
++
++    #[test]
++    fn test_caret_lone_rtl_character() {
++        // A single Persian letter on a line by itself (len 2 bytes). The caret
++        // before it sits at its right edge (RTL reading starts on the right)
++        // and after it at the left edge.
++        let layout = make_layout_runs(vec![make_rtl_run(0, vec![glyph_at(0., 0)])], 10., 2);
++        assert_eq!(f32::from(layout.x_for_index(0)), 10.);
++        assert_eq!(f32::from(layout.x_for_index(2)), 0.);
++        assert_eq!(layout.index_for_x(px(5.)), Some(2));
++        assert_eq!(layout.index_for_x(px(10.)), None);
++        assert_eq!(layout.closest_index_for_x(px(5.)), 2);
++    }
++
++    #[test]
++    fn test_caret_rtl_combining_mark() {
++        // "سَلام" where the ا (index 4) carries a combining mark: base glyph
++        // at x=10 and the mark at x=12 share source index 4, forming one
++        // cluster. The caret must never stop between them (there is no caret
++        // stop at x=12). Glyphs stored in visual (descending index) order.
++        let layout = make_layout_runs(
++            vec![make_rtl_run(
++                0,
++                vec![
++                    glyph_at(0., 6),  // م
++                    glyph_at(10., 4), // ا (base)
++                    glyph_at(12., 4), // َ combining mark, same cluster
++                    glyph_at(30., 2), // ل
++                    glyph_at(40., 0), // س
++                ],
++            )],
++            50.,
++            8,
++        );
++        assert_eq!(f32::from(layout.x_for_index(0)), 50.);
++        assert_eq!(f32::from(layout.x_for_index(2)), 40.);
++        assert_eq!(f32::from(layout.x_for_index(4)), 30.);
++        assert_eq!(f32::from(layout.x_for_index(6)), 10.);
++        assert_eq!(f32::from(layout.x_for_index(8)), 0.);
++        // Clicking inside the base+mark cluster resolves to the boundary on
++        // the cluster's left edge, never to a position between the glyphs.
++        assert_eq!(layout.index_for_x(px(11.)), Some(6));
++        assert_eq!(layout.index_for_x(px(15.)), Some(6));
++        assert_eq!(layout.closest_index_for_x(px(11.)), 6);
++    }
++
      #[test]
      fn test_force_width_latin_unchanged() {
          let cell_width = px(8.);
+diff --git a/crates/gpui_macos/src/text_system.rs b/crates/gpui_macos/src/text_system.rs
+index fbc48864ce..9605b766a1 100644
+--- a/crates/gpui_macos/src/text_system.rs
++++ b/crates/gpui_macos/src/text_system.rs
+@@ -592,6 +592,7 @@ impl MacTextSystemState {
+                     runs.push(ShapedRun {
+                         font_id,
+                         glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
++                        is_rtl: false,
+                     });
+                     &mut runs.last_mut().unwrap().glyphs
+                 }
+diff --git a/crates/gpui_web/src/run_replacements.rs b/crates/gpui_web/src/run_replacements.rs
+index cac43ebf41..8ee74f2ca1 100644
+--- a/crates/gpui_web/src/run_replacements.rs
++++ b/crates/gpui_web/src/run_replacements.rs
+@@ -166,6 +166,7 @@ pub(crate) fn apply_replacements(layout: &mut LineLayout, replacements: Vec<Repl
+     layout.runs.resize_with(final_run_count, || ShapedRun {
+         font_id: FontId(0),
+         glyphs: Vec::new(),
++        is_rtl: false,
+     });
+ 
+     // Every destination is at or after its source. Expanding from the right
+@@ -190,6 +191,7 @@ pub(crate) fn apply_replacements(layout: &mut LineLayout, replacements: Vec<Repl
+                 layout.runs[destination_index] = ShapedRun {
+                     font_id: segment.font_id,
+                     glyphs,
++                    is_rtl: false,
+                 };
+                 glyph_end = glyph_start;
+             }
+@@ -374,6 +376,7 @@ mod tests {
+                 ShapedRun {
+                     font_id: FontId(font),
+                     glyphs,
++                    is_rtl: false,
+                 }
+             })
+             .collect();
+@@ -438,6 +441,7 @@ mod tests {
+                 layout.runs.push(ShapedRun {
+                     font_id,
+                     glyphs: vec![glyph],
++                    is_rtl: false,
+                 });
+             }
+         }
+diff --git a/crates/gpui_wgpu/src/cosmic_text_system.rs b/crates/gpui_wgpu/src/cosmic_text_system.rs
+index 0d04438693..63810c4ea9 100644
+--- a/crates/gpui_wgpu/src/cosmic_text_system.rs
++++ b/crates/gpui_wgpu/src/cosmic_text_system.rs
+@@ -823,6 +823,7 @@ impl CosmicTextSystemState {
+                 runs.push(ShapedRun {
+                     font_id,
+                     glyphs: vec![shaped_glyph],
++                    is_rtl: false,
+                 });
+             }
+         }
 diff --git a/crates/gpui_windows/src/direct_write.rs b/crates/gpui_windows/src/direct_write.rs
-index 08ae7a998f..564849c6a2 100644
+index 5a761cce19..634cd86940 100644
 --- a/crates/gpui_windows/src/direct_write.rs
 +++ b/crates/gpui_windows/src/direct_write.rs
 @@ -613,6 +613,7 @@ impl DirectWriteState {
@@ -521,7 +788,7 @@ index 08ae7a998f..564849c6a2 100644
  
              Ok(LineLayout {
                  font_size,
-@@ -1372,6 +1418,8 @@ struct RendererContext<'t, 'a, 'b> {
+@@ -1394,6 +1440,8 @@ struct RendererContext<'t, 'a, 'b> {
      components: &'a DirectWriteComponents,
      index_converter: StringIndexConverter<'a>,
      runs: &'b mut Vec<ShapedRun>,
@@ -530,7 +797,7 @@ index 08ae7a998f..564849c6a2 100644
      width: f32,
  }
  
-@@ -1483,6 +1531,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1505,6 +1553,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
          if glyph_count == 0 {
              return Ok(());
          }
@@ -541,7 +808,7 @@ index 08ae7a998f..564849c6a2 100644
          let desc = unsafe { &*glyphrundescription };
          let context = unsafe { &mut *(clientdrawingcontext.cast::<RendererContext>().cast_mut()) };
          let Some(font_face) = glyphrun.fontFace.as_ref() else {
-@@ -1503,10 +1555,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1525,10 +1577,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
              .font_info_cache
              .get(&font_face_key)
              .copied()
@@ -554,7 +821,7 @@ index 08ae7a998f..564849c6a2 100644
                      let font = font_face_to_font(font_face, &self.locale)
                          .ok_or_else(|| Error::new(DWRITE_E_NOFONT, "Failed to create font"))?;
                      let font_id = match context.text_system.font_to_font_id.get(&font) {
-@@ -1559,7 +1611,21 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1581,7 +1633,21 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
          let cluster_analyzer = ClusterAnalyzer::new(cluster_map, glyph_count);
          let mut utf16_idx = desc.textPosition as usize;
          let mut glyph_idx = 0;
@@ -577,7 +844,7 @@ index 08ae7a998f..564849c6a2 100644
          for (cluster_utf16_len, cluster_glyph_count) in cluster_analyzer {
              context.index_converter.advance_to_utf16_ix(utf16_idx);
              utf16_idx += cluster_utf16_len;
-@@ -1572,20 +1638,53 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1594,20 +1660,57 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                  let is_emoji =
                      color_font && is_color_glyph(font_face, id, &context.components.factory);
                  let this_glyph_idx = glyph_idx + cluster_glyph_idx;
@@ -598,6 +865,7 @@ index 08ae7a998f..564849c6a2 100644
              }
              glyph_idx += cluster_glyph_count;
          }
+-        context.runs.push(ShapedRun { font_id, glyphs });
 +
 +        // For RTL runs, DirectWrite returns glyphs in logical order; sort by
 +        // descending source index to obtain their visual (left-to-right) order
@@ -627,8 +895,12 @@ index 08ae7a998f..564849c6a2 100644
 +        }
 +
 +        // For RTL runs, `glyphs` is now in visual (descending index) order.
-+        // Index/x queries in LineLayout detect this via `is_rtl_run`.
-         context.runs.push(ShapedRun { font_id, glyphs });
++        // Record the direction explicitly so that LineLayout's caret math is
++        // correct even for single-glyph RTL runs (which have no index descent
++        // to infer the direction from).
++        context
++            .runs
++            .push(ShapedRun { font_id, glyphs, is_rtl });
 +        // Record (bidi_level, start_x, end_x) for Unicode L2 reordering.
 +        context
 +            .run_meta

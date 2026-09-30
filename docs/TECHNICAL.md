@@ -76,12 +76,23 @@ character boundary in the line, the x coordinate where the caret belongs:
 - Runs are stored in visual order and tile the line; each run's *logical*
   span `[start, end)` is derived from the other runs' start indices (no
   source text needed).
-- A run is recognized as RTL purely from its glyph data (`is_rtl_run`:
-  stored indices descend), so **no struct change** is needed and the patch
-  stays minimal.
-- For an LTR run, a glyph's left edge is the caret position *before* its
-  character; for an RTL run it is the caret *after* its character, and the
-  caret before the run's first character sits at the run's **right** edge.
+- RTL runs are recognized via a new `ShapedRun::is_rtl` field, which the
+  Windows shaper sets from DirectWrite's own `bidiLevel`. This is exact even
+  for a **single-glyph RTL run** (one Persian letter between English words),
+  which has no index descent to infer the direction from.
+- Glyphs that share a source index (a base character + its combining marks,
+  or a ligature) are grouped into one **cluster**, and the cluster's left
+  edge is the caret boundary. The caret never stops between a base and its
+  marks — matching VS Code.
+- For an LTR run, a cluster's left edge is the caret position *before* its
+  character; for an RTL run it is the caret *after* its character.
+- The two *outer* stops of a run (before its first character, after its
+  last) depend on context: an RTL run that starts the line has its
+  "before-first-character" caret at the run's **right** edge (RTL reading
+  begins on the right), but when another run precedes it the caret sits at
+  the run's **left** edge (the boundary with that run); symmetrically for
+  the run's last character. This is what makes mixed lines like `aبb`
+  behave like VS Code.
 - When an LTR run and an RTL run share a boundary byte index, the LTR run's
   stop wins (it marks the true visual segment boundary).
 
@@ -91,22 +102,29 @@ original O(n) early-return scan, so LTR-only lines are byte-for-byte
 unchanged.
 
 Unit tests (`text_system::line_layout::tests`) cover pure-LTR, pure-RTL,
-LTR-then-RTL and RTL-then-LTR lines.
+LTR-then-RTL, RTL-then-LTR, a single-glyph RTL run embedded in LTR text, a
+lone RTL character, and an RTL run carrying a combining mark.
 
 ## Scope / safety
 
-- The patch touches **only** `direct_write.rs` and
-  `crates/gpui/src/text_system/line_layout.rs` (both Windows-safe: the
-  changed `line_layout.rs` code is platform-independent layout math).
-- No struct/API changes, so it applies across upstream versions and never
-  touches macOS/Linux/Web shaping code.
+- The core fix is in `direct_write.rs` (rendering fixes 1 & 2) and
+  `crates/gpui/src/text_system/line_layout.rs` (caret fix 3).
+- Fix 3 adds one field, `ShapedRun::is_rtl: bool`, so the patch also touches
+  the other places that construct a `ShapedRun` (the editor's run-splitting
+  code and the macOS/Linux/Web/test shapers), setting it to `false` there.
+  Windows behaviour is unchanged on those paths (they already produce
+  logical-order runs); the field only carries the direction the Windows
+  shaper already knew.
 - The L2 path is guarded; LTR-only inputs never enter it.
 
 ## Files
 
 - `patch/zed-rtl.patch` — the whole fix, `git diff` against upstream at the
-  pinned commit (`UPSTREAM_REF`). Two files:
-  `crates/gpui_windows/src/direct_write.rs` (rendering fixes 1 & 2) and
-  `crates/gpui/src/text_system/line_layout.rs` (caret fix 3).
+  pinned commit (`UPSTREAM_REF`):
+  `crates/gpui_windows/src/direct_write.rs` (rendering fixes 1 & 2),
+  `crates/gpui/src/text_system/line_layout.rs` (caret fix 3), plus the
+  `is_rtl` field additions in `crates/gpui/src/platform.rs`,
+  `crates/gpui/src/text_system/line.rs`, `crates/gpui_macos`,
+  `crates/gpui_wgpu` and `crates/gpui_web`.
 - `patch/direct_write.rs` — human-readable reference copy of the patched
   Windows shaper (not used by CI).
