@@ -161,7 +161,7 @@ $hash = (Get-FileHash $outExe -Algorithm SHA256).Hash.ToLower()
     built_at          = (Get-Date -Format "o")
     sha256            = $hash
     size_bytes        = (Get-Item $outExe).Length
-    toolchain         = "1.95.0-x86_64-pc-windows-msvc"
+    toolchain         = "$channel-x86_64-pc-windows-msvc"
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir "build-info.json")
 
 Write-Host "DONE. Artifact: $outExe"

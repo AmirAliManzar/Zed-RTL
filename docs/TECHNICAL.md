@@ -114,7 +114,8 @@ lone RTL character, and an RTL run carrying a combining mark.
   code and the macOS/Linux/Web/test shapers), setting it to `false` there.
   Windows behaviour is unchanged on those paths (they already produce
   logical-order runs); the field only carries the direction the Windows
-  shaper already knew.
+  shaper already knew. Note: the Windows CI job does not compile the
+  macOS/Linux/Web crates, so those edits are covered by inspection only.
 - The L2 path is guarded; LTR-only inputs never enter it.
 
 ## Files
