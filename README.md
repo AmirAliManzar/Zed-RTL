@@ -6,9 +6,9 @@
 
 </div>
 
-Zed (the code editor) renders right-to-left scripts — Persian, Arabic, Hebrew — **garbled on Windows**: letters disconnected, words reversed (`سلام خوبی؟` shows as `خوبی؟ سلام`). This repo fixes it at the text-shaping level and publishes ready-to-use Windows builds.
+Zed (the code editor) renders right-to-left scripts — Persian, Arabic, Hebrew — **garbled on Windows**: letters disconnected, words reversed (`سلام خوبی؟` shows as `خوبی؟ سلام`), and the caret/cursor doesn't move correctly through RTL text. This repo fixes it at the text-shaping level and publishes ready-to-use Windows builds.
 
-**Status:** working and verified on Persian text (mixed Persian/English lines included). English-only lines are completely untouched (zero behavioral change).
+**Status:** working and verified on Persian text — letter joining, word order, **and caret movement / click positioning** (mixed Persian/English lines included). English-only lines are completely untouched (zero behavioral change).
 
 ---
 
@@ -57,7 +57,7 @@ Requires: Rust 1.95.0 (installed automatically by the script via rustup), MSVC b
 
 ## 🔁 Keeping builds fresh
 
-`mirror-upstream.yml` runs weekly: if upstream Zed published a new release tag, it bumps `UPSTREAM_REF` and pushes — which triggers a fresh build + rolling release automatically. The build script reads its toolchain from upstream's `rust-toolchain.toml`, so it adapts when Zed bumps its Rust version. If the patch no longer applies to a newer Zed (the file changed upstream), the build fails loudly and an issue is the cue to refresh `patch/zed-rtl.patch`.
+`mirror-upstream.yml` runs **every 6 hours**: if upstream Zed published a new release tag, it bumps `UPSTREAM_REF` and pushes — which triggers a fresh build + rolling release automatically. The build script reads its toolchain from upstream's `rust-toolchain.toml`, so it adapts when Zed bumps its Rust version. If the patch no longer applies to a newer Zed (the file changed upstream), the build fails loudly and an issue is the cue to refresh `patch/zed-rtl.patch`.
 
 ## 📄 License
 

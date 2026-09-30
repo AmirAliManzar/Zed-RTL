@@ -12,9 +12,9 @@
 [CmdletBinding()]
 param(
     [string]$ZedExe = "",
-    [string]$Tag = "rolling",                 # release tag to pull the build from
+    [string]$Tag = "",                            # auto: matches installed version, falls back to rolling
     [string]$Asset = "zed-rtl-x86_64.exe",
-    [string]$LocalExe = "",                   # use a local build instead of downloading
+    [string]$LocalExe = "",                       # use a local build instead of downloading
     [switch]$Revert,
     [switch]$DisableAutoUpdate,
     [switch]$VerifyOnly,
@@ -75,9 +75,34 @@ if ($LocalExe) {
     $src = $LocalExe
     Write-Host "Using local build: $src"
 } else {
+    # Resolve which release tag to use: the one matching the installed Zed
+    # (e.g. installed 1.21.0 -> tag "v1.21.0"), falling back to "rolling".
+    if (-not $Tag) {
+        $installedProduct = (Get-Item $Zed).VersionInfo.ProductVersion
+        if ($installedProduct) {
+            $clean = ($installedProduct -split '\+')[0]   # 1.21.0+stable... -> 1.21.0
+            $candidate = "v$clean"
+            $Tag = $candidate
+            Write-Host "Installed Zed is $installedProduct -> trying release tag $Tag"
+        } else {
+            $Tag = "rolling"
+            Write-Warning "Could not read installed Zed version; defaulting to 'rolling'."
+        }
+    }
+
     $url = "https://github.com/$Repo/releases/download/$Tag/$Asset"
     Write-Host "Downloading $url ..."
-    Invoke-WebRequest -Uri $url -OutFile $downloaded
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $downloaded
+    } catch {
+        if ($Tag -ne "rolling") {
+            Write-Warning "No build for tag $Tag; falling back to the 'rolling' release."
+            $Tag = "rolling"
+            $url = "https://github.com/$Repo/releases/download/$Tag/$Asset"
+            Write-Host "Downloading $url ..."
+            Invoke-WebRequest -Uri $url -OutFile $downloaded
+        } else { throw }
+    }
     # hash-verify against the published .sha256 sidecar
     $sumUrl = "$url.sha256"
     try {
@@ -98,11 +123,6 @@ $installedVer = (Get-Item $Zed).VersionInfo.ProductVersion
 $srcVer = (Get-Item $src).VersionInfo.ProductVersion
 Write-Host "Installed Zed : $Zed  (version: $(if ($installedVer) { $installedVer } else { 'n/a' }))"
 Write-Host "Replacement    : $src   (version: $(if ($srcVer) { $srcVer } else { 'dev build' }))"
-
-if ($installedVer -and $srcVer -and ($installedVer -ne $srcVer)) {
-    Write-Warning "Version mismatch: replacing $installedVer with $srcVer may be a downgrade."
-    Write-Warning "Pick a matching release tag: patch-zed.ps1 -Tag v<x.y.z>"
-}
 
 if ($VerifyOnly) {
     $h1 = (Get-FileHash $Zed -Algorithm SHA256).Hash.ToLower()

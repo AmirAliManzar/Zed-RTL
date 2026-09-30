@@ -60,16 +60,53 @@ This matches what CoreText gives Zed on macOS (runs in visual order with
 absolute positions), so the rest of Zed's layout/hit-testing code sees the
 shape it was written for.
 
+### 3. Caret position and hit-testing broke for RTL runs
+
+`LineLayout` (in `crates/gpui/src/text_system/line_layout.rs`) answers three
+questions the editor needs for the caret and mouse: `x_for_index` (where to
+draw the caret), `index_for_x` / `closest_index_for_x` (which character was
+clicked / which boundary is nearest). All three assumed glyphs are stored in
+**logical** order (ascending source index, ascending x). Fixes 1 and 2 store
+RTL runs in **visual** order, so for RTL text the caret stopped moving
+correctly and clicks landed one character off.
+
+**Fix:** `LineLayout` now builds an explicit list of *caret stops* — for every
+character boundary in the line, the x coordinate where the caret belongs:
+
+- Runs are stored in visual order and tile the line; each run's *logical*
+  span `[start, end)` is derived from the other runs' start indices (no
+  source text needed).
+- A run is recognized as RTL purely from its glyph data (`is_rtl_run`:
+  stored indices descend), so **no struct change** is needed and the patch
+  stays minimal.
+- For an LTR run, a glyph's left edge is the caret position *before* its
+  character; for an RTL run it is the caret *after* its character, and the
+  caret before the run's first character sits at the run's **right** edge.
+- When an LTR run and an RTL run share a boundary byte index, the LTR run's
+  stop wins (it marks the true visual segment boundary).
+
+`x_for_index`, `index_for_x`, `closest_index_for_x` and `font_id_for_index`
+are rewritten on top of these stops. Code paths with **no RTL run** keep the
+original O(n) early-return scan, so LTR-only lines are byte-for-byte
+unchanged.
+
+Unit tests (`text_system::line_layout::tests`) cover pure-LTR, pure-RTL,
+LTR-then-RTL and RTL-then-LTR lines.
+
 ## Scope / safety
 
-- The patch touches **only** `direct_write.rs` (+ the `run_meta` field on
-  the internal `RendererContext`).
-- No changes to any other crate, no settings, no UI.
+- The patch touches **only** `direct_write.rs` and
+  `crates/gpui/src/text_system/line_layout.rs` (both Windows-safe: the
+  changed `line_layout.rs` code is platform-independent layout math).
+- No struct/API changes, so it applies across upstream versions and never
+  touches macOS/Linux/Web shaping code.
 - The L2 path is guarded; LTR-only inputs never enter it.
 
 ## Files
 
 - `patch/zed-rtl.patch` — the whole fix, `git diff` against upstream at the
-  pinned commit (`UPSTREAM_REF`).
+  pinned commit (`UPSTREAM_REF`). Two files:
+  `crates/gpui_windows/src/direct_write.rs` (rendering fixes 1 & 2) and
+  `crates/gpui/src/text_system/line_layout.rs` (caret fix 3).
 - `patch/direct_write.rs` — human-readable reference copy of the patched
-  file (not used by CI).
+  Windows shaper (not used by CI).

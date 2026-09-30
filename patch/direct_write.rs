@@ -1652,34 +1652,34 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
         }
 
         // For RTL runs, DirectWrite returns glyphs in logical order; sort by
-        // descending source index to obtain their visual (left-to-right) order.
+        // descending source index to obtain their visual (left-to-right) order
+        // for painting.
         if is_rtl {
             temp_glyphs.sort_by_key(|t| std::cmp::Reverse(t.index));
         }
 
         // Assign final positions, placing glyphs left-to-right
         let mut x = run_start_x;
-        let glyphs: Vec<ShapedGlyph> = temp_glyphs
-            .into_iter()
-            .map(|t| {
-                // For RTL, negate advance_offset: the original offset was along
-                // the RTL advance direction (leftward), but after reversal we
-                // place glyphs leftward-to-rightward, so the offset must flip.
-                let offset_x = if is_rtl { -t.advance_offset } else { t.advance_offset };
-                let glyph = ShapedGlyph {
-                    id: t.id,
-                    position: point(
-                        px(x + offset_x),
-                        px(-t.ascender_offset),
-                    ),
-                    index: t.index,
-                    is_emoji: t.is_emoji,
-                };
-                x += t.advance;
-                glyph
-            })
-            .collect();
+        let mut glyphs: Vec<ShapedGlyph> = Vec::with_capacity(temp_glyphs.len());
+        for t in temp_glyphs {
+            // For RTL, negate advance_offset: the original offset was along
+            // the RTL advance direction (leftward), but after reversal we
+            // place glyphs leftward-to-rightward, so the offset must flip.
+            let offset_x = if is_rtl { -t.advance_offset } else { t.advance_offset };
+            glyphs.push(ShapedGlyph {
+                id: t.id,
+                position: point(
+                    px(x + offset_x),
+                    px(-t.ascender_offset),
+                ),
+                index: t.index,
+                is_emoji: t.is_emoji,
+            });
+            x += t.advance;
+        }
 
+        // For RTL runs, `glyphs` is now in visual (descending index) order.
+        // Index/x queries in LineLayout detect this via `is_rtl_run`.
         context.runs.push(ShapedRun { font_id, glyphs });
         // Record (bidi_level, start_x, end_x) for Unicode L2 reordering.
         context
