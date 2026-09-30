@@ -2,3 +2,7 @@ artifacts/
 work/
 *.user-data-dir/
 *.patch.user
+
+patcher/target/
+target/
+

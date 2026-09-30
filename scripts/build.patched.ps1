@@ -10,7 +10,8 @@
 [CmdletBinding()]
 param(
     [string]$UpstreamRef = "",
-    [string]$ArtifactName = "zed-rtl-x86_64.exe",
+    [string]$Target = "x86_64-pc-windows-msvc",
+    [string]$ArtifactName = "",
     [string]$WorkDir = "",
     [string]$OutDir = "",
     [string]$Proxy = $env:HTTP_PROXY,
@@ -20,6 +21,20 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $patchPath = Join-Path $repoRoot "patch\zed-rtl.patch"
+
+# Default artifact name matches the build target.
+if (-not $ArtifactName) {
+    $ArtifactName = if ($Target -like "aarch64*") { "zed-rtl-aarch64.exe" } else { "zed-rtl-x86_64.exe" }
+}
+
+# Host triple (the machine running the build). The toolchain is installed for
+# the host, then the cross target is layered on top of it.
+$hostTriple = "x86_64-pc-windows-msvc"
+try {
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -eq "Arm64") {
+        $hostTriple = "aarch64-pc-windows-msvc"
+    }
+} catch { }
 
 if (-not $UpstreamRef) {
     $UpstreamRef = (Get-Content (Join-Path $repoRoot "UPSTREAM_REF") -Raw).Trim()
@@ -38,7 +53,8 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     if (Test-Path $localCmake) { $env:PATH = "$localCmake;$env:PATH" }
 }
 if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
-    Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile "rustup-init.exe"
+    $rustupArch = if ($hostTriple -like "aarch64*") { "aarch64" } else { "x86_64" }
+    Invoke-WebRequest -Uri "https://win.rustup.rs/$rustupArch" -OutFile "rustup-init.exe"
     & ".\rustup-init.exe" -y --default-toolchain none --profile minimal
     $env:PATH += ";$env:USERPROFILE\.cargo\bin"
 }
@@ -72,8 +88,12 @@ $m = Select-String -Path $tcFile -Pattern '^\s*channel\s*=\s*"([^"]+)"' -ErrorAc
 if ($m) { $channel = $m.Matches[0].Groups[1].Value }
 Write-Host "Toolchain from upstream rust-toolchain.toml: $channel"
 rustup toolchain install $channel --profile minimal
-$env:RUSTUP_TOOLCHAIN = "$channel-x86_64-pc-windows-msvc"
+$env:RUSTUP_TOOLCHAIN = "$channel-$hostTriple"
+if ($Target -ne $hostTriple) {
+    rustup target add $Target --toolchain "$channel-$hostTriple"
+}
 Write-Host "Rust: $(cargo --version)"
+Write-Host "Build target: $Target"
 
 # ---------------------------------------------------------------- patch
 Write-Host "Applying patch..."
@@ -92,7 +112,8 @@ if ($LASTEXITCODE -ne 0) { throw "git apply failed" }
 # ------------------------------------------------------- spectre workaround
 # The Rust `windows` crate links MSVC's Spectre-mitigated libs, but the
 # "Spectre-mitigated libraries" VS component is often not installed.
-# If lib\spectre\x64 is missing, junction it to lib\x64 (same 76 .lib files).
+# If lib\spectre\<arch> is missing, junction it to lib\<arch>.
+$archDir = if ($Target -like "aarch64*") { "arm64" } else { "x64" }
 $vsBases = @(
     "C:\Program Files\Microsoft Visual Studio\2022",
     "C:\Program Files (x86)\Microsoft Visual Studio\2022",
@@ -107,25 +128,25 @@ foreach ($base in $vsBases) {
     if (-not $latest) { continue }
     # handles both standard (tools\ver\lib) and rare flat (lib) layouts
     $libRoots = @((Join-Path $latest.FullName "lib"), (Join-Path $msvcDir "lib"))
-    foreach ($libRoot in ($libRoots | Where-Object { Test-Path (Join-Path $_ "x64") })) {
-        $spectre = Join-Path $libRoot "spectre\x64"
-        $x64 = Join-Path $libRoot "x64"
-        if (-not (Test-Path $spectre) -and (Test-Path $x64)) {
-            Write-Host "Spectre libs missing -> junction $spectre -> $x64"
-            New-Item -ItemType Junction -Path $spectre -Target $x64 -Force | Out-Null
+    foreach ($libRoot in ($libRoots | Where-Object { Test-Path (Join-Path $_ $archDir) })) {
+        $spectre = Join-Path $libRoot "spectre\$archDir"
+        $archLib = Join-Path $libRoot $archDir
+        if (-not (Test-Path $spectre) -and (Test-Path $archLib)) {
+            Write-Host "Spectre libs missing -> junction $spectre -> $archLib"
+            New-Item -ItemType Junction -Path $spectre -Target $archLib -Force | Out-Null
         }
     }
 }
 
 # ---------------------------------------------------------------- build
-Write-Host "Building (release) - this takes a while..."
+Write-Host "Building (release, $Target) - this takes a while..."
 Push-Location $srcDir
-cargo build --release -p zed
+cargo build --release --target $Target -p zed
 $buildOk = $LASTEXITCODE -eq 0
 Pop-Location
 if (-not $buildOk) { throw "cargo build failed" }
 
-$exe = Join-Path $srcDir "target\release\zed.exe"
+$exe = Join-Path $srcDir "target\$Target\release\zed.exe"
 if (-not (Test-Path $exe)) { throw "expected build output not found: $exe" }
 $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 Write-Host "Built zed.exe ($sizeMB MB)"
@@ -161,7 +182,8 @@ $hash = (Get-FileHash $outExe -Algorithm SHA256).Hash.ToLower()
     built_at          = (Get-Date -Format "o")
     sha256            = $hash
     size_bytes        = (Get-Item $outExe).Length
-    toolchain         = "$channel-x86_64-pc-windows-msvc"
+    toolchain         = "$channel-$hostTriple"
+    target            = $Target
 } | ConvertTo-Json | Set-Content (Join-Path $OutDir "build-info.json")
 
 Write-Host "DONE. Artifact: $outExe"

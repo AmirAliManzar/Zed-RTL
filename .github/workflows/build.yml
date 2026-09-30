@@ -1,4 +1,4 @@
-name: Build (Windows x64)
+name: Build
 
 on:
   push:
@@ -23,9 +23,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two runner images verify the build works across current Windows toolchains.
-        # The produced x86_64 exe is portable to any Windows 10/11 x64 machine.
-        os: [ windows-2022, windows-2025 ]
+        include:
+          # Two x64 runner images verify the build across current toolchains.
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            artifact: zed-rtl-x86_64.exe
+            patcher: zed-rtl-patcher-x86_64.exe
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: zed-rtl-x86_64.exe
+            patcher: zed-rtl-patcher-x86_64.exe
+          # Windows on ARM. Treated as best-effort: an ARM failure must never
+          # block publishing the x64 assets.
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: zed-rtl-aarch64.exe
+            patcher: zed-rtl-patcher-aarch64.exe
+            best_effort: 'true'
 
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -34,47 +48,108 @@ jobs:
       - name: Checkout this repo (patch + scripts)
         uses: actions/checkout@v4
 
-      # Rust itself is preinstalled on GitHub's windows runners; the build
-      # script installs the exact channel pinned by upstream's
-      # rust-toolchain.toml (ref-agnostic).
       - name: Cache cargo registry & git
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ matrix.os }}-v2
-          restore-keys: cargo-${{ matrix.os }}-v2
+          key: cargo-${{ matrix.target }}-${{ matrix.os }}-v3
+          restore-keys: cargo-${{ matrix.target }}-${{ matrix.os }}-v3
 
       - name: Build patched Zed
         shell: pwsh
+        continue-on-error: ${{ matrix.best_effort == 'true' }}
         run: |
-          $buildArgs = @("./scripts/build.patched.ps1")
+          $buildArgs = @(
+            "./scripts/build.patched.ps1",
+            "-Target", "${{ matrix.target }}",
+            "-ArtifactName", "${{ matrix.artifact }}"
+          )
           if ("${{ github.event.inputs.upstream_ref }}") { $buildArgs += "-UpstreamRef", "${{ github.event.inputs.upstream_ref }}" }
           & Powershell -ExecutionPolicy Bypass -File @buildArgs
 
-      - name: Upload build artifact
+      # Tiny dependency-free crate; builds in seconds for the same target and
+      # ends up next to the Zed build in artifacts/.
+      - name: Build the patcher exe
+        shell: pwsh
+        continue-on-error: ${{ matrix.best_effort == 'true' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --manifest-path patcher/Cargo.toml --target ${{ matrix.target }}
+          $src = "patcher/target/${{ matrix.target }}/release/zed-rtl-patcher.exe"
+          if (-not (Test-Path $src)) { throw "patcher binary not found: $src" }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $out = "artifacts/${{ matrix.patcher }}"
+          Copy-Item $src $out -Force
+          $h = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+          "$h  ${{ matrix.patcher }}" | Set-Content "artifacts/${{ matrix.patcher }}.sha256" -NoNewline
+          Write-Host "Built $out ($([math]::Round((Get-Item $out).Length / 1KB)) KB)"
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zed-rtl-${{ matrix.os }}
+          name: out-${{ matrix.target }}-${{ matrix.os }}
           path: artifacts/*
-          if-no-files-found: error
+          if-no-files-found: ${{ matrix.best_effort == 'true' && 'warn' || 'error' }}
 
-      - name: Publish to GitHub Releases (single runner to avoid races)
-        if: matrix.os == 'windows-2022'
-        shell: pwsh
+  # Single publishing job: pulls every artifact and pushes them all to one
+  # release, so the ARM build can't race the x64 one.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+
+      - name: Assemble release assets
+        run: |
+          set -e
+          mkdir -p release-assets
+          # x64: prefer the windows-2022 build, fall back to the 2025 one.
+          cp -f dl/out-x86_64-pc-windows-msvc-windows-2022/*.exe release-assets/ 2>/dev/null || true
+          cp -f dl/out-x86_64-pc-windows-msvc-windows-2025/*.exe release-assets/ 2>/dev/null || true
+          cp -f dl/out-aarch64-pc-windows-msvc-windows-11-arm/*.exe release-assets/ 2>/dev/null || true
+          # The patch itself, for anyone who builds Zed themselves.
+          cp -f patch/zed-rtl.patch release-assets/zed-rtl.patch
+          echo '--- assets ---'
+          ls -la release-assets
+          echo '--- sha256 ---'
+          cd release-assets
+          for f in *.exe *.patch; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" | tee "$f.sha256"
+          done
+
+      - name: Publish to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = if ($env:GITHUB_REF -match '^refs/tags/(.+)$') { $matches[1] } else { "rolling" }
-          Write-Host "Publishing to release: $tag"
-          if ($tag -eq 'rolling') {
-            $notes = "Automatic build of main @ ${{ github.sha }}`nBuilt: $(Get-Date -Format 'yyyy-MM-dd HH:mm UTC')"
-            gh release create rolling --title "Rolling build (auto)" --notes $notes --prerelease 2>$null
-            if ($LASTEXITCODE -ne 0) {
-              gh release edit rolling --notes $notes 2>$null
-            }
-          } else {
-            gh release create "$tag" --verify-tag --generate-notes 2>$null
-          }
-          gh release upload "$tag" artifacts/* --clobber
+          tag="${GITHUB_REF#refs/tags/}"
+          if [ "$tag" = "$GITHUB_REF" ]; then tag="rolling"; fi
+          echo "Publishing to release: $tag"
+          if [ "$tag" = "rolling" ]; then
+            notes=$(printf 'Automatic build of main @ %s\nBuilt: %s\nAssets: %s' \
+              "$GITHUB_SHA" "$(date -u +'%Y-%m-%d %H:%M UTC')" "$(ls release-assets | tr '\n' ' ')")
+            if gh release view rolling >/dev/null 2>&1; then
+              gh release edit rolling --notes "$notes"
+            else
+              gh release create rolling --title "Rolling build (auto)" --notes "$notes" --prerelease
+            fi
+          else
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release edit "$tag" --generate-notes
+            else
+              gh release create "$tag" --verify-tag --generate-notes
+            fi
+          fi
+          gh release upload "$tag" release-assets/* --clobber
+          echo '--- published ---'
+          gh release view "$tag" --json assets --jq '.assets[].name'
