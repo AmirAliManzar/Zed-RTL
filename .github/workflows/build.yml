@@ -114,13 +114,16 @@ jobs:
           set -e
           mkdir -p release-assets
           # x64: prefer the windows-2022 build, fall back to the 2025 one.
-          cp -f dl/out-x86_64-pc-windows-msvc-windows-2022/*.exe release-assets/ 2>/dev/null || true
-          cp -f dl/out-x86_64-pc-windows-msvc-windows-2025/*.exe release-assets/ 2>/dev/null || true
+          if ls dl/out-x86_64-pc-windows-msvc-windows-2022/*.exe >/dev/null 2>&1; then
+            cp -f dl/out-x86_64-pc-windows-msvc-windows-2022/*.exe release-assets/
+            cp -f dl/out-x86_64-pc-windows-msvc-windows-2022/build-info.json release-assets/build-info-x86_64.json
+          else
+            cp -f dl/out-x86_64-pc-windows-msvc-windows-2025/*.exe release-assets/
+            cp -f dl/out-x86_64-pc-windows-msvc-windows-2025/build-info.json release-assets/build-info-x86_64.json
+          fi
           cp -f dl/out-aarch64-pc-windows-msvc-windows-11-arm/*.exe release-assets/ 2>/dev/null || true
           # build-info records which upstream Zed version each build is for.
           # The patcher reads it to pick the right release for an install.
-          cp -f dl/out-x86_64-pc-windows-msvc-windows-2022/build-info.json release-assets/build-info-x86_64.json 2>/dev/null || true
-          cp -f dl/out-x86_64-pc-windows-msvc-windows-2025/build-info.json release-assets/build-info-x86_64.json 2>/dev/null || true
           cp -f dl/out-aarch64-pc-windows-msvc-windows-11-arm/build-info.json release-assets/build-info-aarch64.json 2>/dev/null || true
           # The patch itself, for anyone who builds Zed themselves.
           cp -f patch/zed-rtl.patch release-assets/zed-rtl.patch
