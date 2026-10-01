@@ -1,143 +1,151 @@
-# Zed RTL: RTL/Persian text fix for Zed on Windows
+# Zed RTL
 
-Zed on Windows draws right-to-left text broken. Letters don't join, words come
-out backwards, the caret ends up in the wrong place. This repo fixes it and
-ships Windows builds you can just run.
+A Windows patch that fixes right-to-left text rendering in [Zed](https://github.com/zed-industries/zed).
 
-The fix is in the text-shaping layer, so it works everywhere Zed draws text:
-editor, terminal pane, remote sessions.
+On Windows, Zed currently has problems rendering Persian, Arabic, and Hebrew text. Characters may appear disconnected, words may be displayed in the wrong order, and the caret may be placed incorrectly.
+
+This patch fixes the problem at the text-shaping layer, so it applies wherever Zed renders text, including:
+
+- The editor
+- The terminal
+- Remote sessions
 
 ## Downloads
 
-All of it is on the [releases page](https://github.com/AmirAliManzar/Zed-RTL/releases):
+Prebuilt files are available on the [Releases](../../releases) page:
 
-- `zed-rtl-x86_64.exe`, portable Zed build, 64-bit Intel/AMD
-- `zed-rtl-aarch64.exe`, same thing for Windows on ARM
-- `zed-rtl-patcher-x86_64.exe` / `zed-rtl-patcher-aarch64.exe`, the one-click
-  patcher (asks for admin, swaps your installed Zed for the fixed one)
-- `zed-rtl.patch`, just the patch, if you build Zed yourself
+- `zed-rtl-x86_64.exe` — Portable build for 64-bit Intel/AMD systems
+- `zed-rtl-aarch64.exe` — Portable build for Windows on ARM
+- `zed-rtl-patcher-x86_64.exe` — Patcher for x86_64 installations
+- `zed-rtl-patcher-aarch64.exe` — Patcher for ARM64 installations
+- `zed-rtl.patch` — The patch for building Zed yourself
 
-The Zed builds are portable. No installer, no admin prompt, they read your
-existing settings from `%APPDATA%\Zed`. Double-click and you're in.
+The portable builds do not require installation or administrator access. They use your existing Zed configuration from:
 
-## Replacing your installed Zed
+```text
+%APPDATA%\Zed
+```
 
-Run the patcher exe above (it pops a UAC prompt), or from PowerShell:
+Download the version that matches your system and run it.
+
+## Patching an Existing Installation
+
+To patch an installed copy of Zed, run the patcher for your system architecture.
+
+The patcher:
+
+1. Creates a backup of your current `Zed.exe`
+2. Downloads the build that matches your installed Zed version
+3. Replaces the original executable with the patched one
+
+You can also run the patcher from PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\patch-zed.ps1
 ```
 
-Both back up your current `Zed.exe`, download the build matching your installed
-version, and swap it in. Useful switches: `-DisableAutoUpdate` so an official
-update doesn't quietly undo the fix, `-Revert` to put the original back, and
-`-ZedExe <path>` to patch a Zed somewhere else.
-
-## Surviving official Zed updates
-
-Zed's auto-updater replaces `Zed.exe` wholesale, so any exe-level fix is erased
-the moment an update lands. There is no smaller file to patch: Zed is a single
-statically-linked exe, the rendering code is compiled into it, and extensions
-run sandboxed and cannot touch text shaping.
-
-Two practical ways to keep the fix:
-
-1. Patch once and turn auto-update off
-   (`patch-zed.ps1 -DisableAutoUpdate`). The fix stays forever, but you stop
-   getting official updates until you update manually and re-patch.
-2. Keep auto-update on and re-run the patcher after each update. It is a
-   double-click, about 5 seconds, no reinstall, no admin rights; it fetches
-   the build matching your new version from Releases. Your settings and
-   extensions are never touched.
-
-The `mirror-upstream` job here polls Zed every 6 hours and rebuilds for each
-new official version, so the patcher always finds a match.
-
-The real fix is upstream: once this lands in `zed-industries/zed`, every
-official build renders Persian/RTL correctly out of the box and none of this
-is needed anymore.
-
-## Building it yourself
+Useful options:
 
 ```powershell
-# x64
+# Disable automatic updates
+powershell -ExecutionPolicy Bypass -File .\scripts\patch-zed.ps1 -DisableAutoUpdate
+
+# Restore the original executable
+powershell -ExecutionPolicy Bypass -File .\scripts\patch-zed.ps1 -Revert
+
+# Use a custom Zed executable
+powershell -ExecutionPolicy Bypass -File .\scripts\patch-zed.ps1 -ZedExe "C:\Path\To\Zed.exe"
+```
+
+## Zed Updates
+
+Zed's updater replaces the entire `Zed.exe` file. As a result, an official update removes the patch.
+
+There is no separate DLL that can be replaced instead: Zed is distributed as a single statically linked executable, and the text-rendering code is compiled into it.
+
+You have two options:
+
+1. Disable automatic updates and update Zed manually when needed.
+2. Keep automatic updates enabled and run the patcher again after each update.
+
+The patcher downloads the build corresponding to your installed Zed version. Your settings and extensions are not affected.
+
+This repository checks for new Zed releases every six hours and builds a matching patched version when needed.
+
+## Building from Source
+
+Requirements:
+
+- Rust
+- MSVC build tools
+- CMake
+
+Build the x64 version:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-and-deploy.ps1
-# ARM64
+```
+
+Build the ARM64 version:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build.patched.ps1 -Target aarch64-pc-windows-msvc
 ```
 
-You need Rust, the MSVC build tools and CMake. The script installs the Rust
-channel Zed pins. Takes about an hour on 4 cores. `UPSTREAM_REF` says which Zed
-version gets patched.
+The build script installs the Rust toolchain pinned by Zed. A build typically takes about an hour on a four-core machine.
 
-If you want to read what the patch actually does and why, the explanations live
-as comments in the patched sources themselves:
-`crates/gpui_windows/src/direct_write.rs` (glyph and run reordering) and
-`crates/gpui/src/text_system/line_layout.rs` (caret stops). The whole change is
-`patch/zed-rtl.patch`, and `patch/direct_write.rs` is a readable reference copy
-of the patched Windows shaper.
+The Zed version being patched is specified by `UPSTREAM_REF`.
+
+## Implementation Details
+
+The patch changes two parts of Zed:
+
+- `crates/gpui_windows/src/direct_write.rs`  
+  Glyph shaping and text-run reordering on Windows
+
+- `crates/gpui/src/text_system/line_layout.rs`  
+  Caret and cursor positions
+
+The complete patch is available at:
+
+```text
+patch/zed-rtl.patch
+```
+
+A readable copy of the patched Windows text shaper is available at:
+
+```text
+patch/direct_write.rs
+```
+
+The implementation keeps lines containing only English text or numbers unchanged.
+
+## Status
+
+This repository is a temporary solution until proper RTL support is merged into Zed itself.
+
+The approach is based on the work discussed in [Zed PR #60115](https://github.com/zed-industries/zed/pull/60115).
 
 ## License
 
-Same as Zed: **GPL-3.0**. [LICENSE](LICENSE) is copied from Zed itself. The two
-crates the patch touches (`gpui`, `gpui_windows`) are Apache-2.0 upstream, see
-[LICENSE-APACHE](LICENSE-APACHE), which is compatible. A downloaded `zed.exe`
-is a modified Zed and carries Zed's own license terms.
+This project uses the same GPL-3.0 license as Zed. The license text is included in `LICENSE`.
 
-## Credit
+The two upstream crates modified by this patch, `gpui` and `gpui_windows`, are licensed under Apache-2.0. See `LICENSE-APACHE` for the applicable license text.
 
-The approach builds on [zed PR #60115](https://github.com/zed-industries/zed/pull/60115).
-The proper home for this fix is upstream. This repo is the stopgap until then.
+Downloaded Zed binaries are modified versions of Zed and remain subject to Zed's license terms.
 
 ---
 
-<div dir="rtl" align="right">
-
 ## فارسی
 
-Zed توی ویندوز متن فارسی/عربی/عبری رو خراب نشون می‌ده: حروف از هم جدا میشن،
-کلمات برعکس میشن و کرسر هم یه جای دیگه می‌افته. این ریپو هم مشکل رو حل می‌کنه
-هم بیلد آماده‌اش رو داره.
+این پروژه مشکل نمایش متن‌های راست‌به‌چپ، به‌ویژه فارسی، عربی و عبری، رو در نسخهٔ ویندوز Zed برطرف می‌کنه.
 
-**چیا درست شده:**
-- اتصال حروف، یعنی shaping درست برای فارسی/عربی/عبری
-- ترتیب کلمات، حتی تو خطوطی که فارسی و انگلیسی قاطی شدن
-- حرکت کرسر و کلیک روی متن فارسی
-- خطوطی که فقط انگلیسی یا عددن، دست‌نخورده موندن
+برای استفاده، نسخهٔ مناسب سیستم خودتون رو از بخش [Releases](../../releases) دانلود کنید. فایل‌های پورتابل نیازی به نصب ندارند و تنظیمات فعلی Zed رو حفظ می‌کنن.
 
-**چطور استفاده کنی:**
-- `zed-rtl-x86_64.exe` رو (یا `zed-rtl-aarch64.exe` اگه ARM داری) از
-  [releases](https://github.com/AmirAliManzar/Zed-RTL/releases) بگیر و
-  دابل‌کلیک کن. نصبی نیست و تنظیمات Zed خودت رو می‌خونه.
-- اگه می‌خوای Zedِ نصب‌شده عوض بشه: پچر `zed-rtl-patcher-x86_64.exe` رو اجرا
-  کن (خودش دسترسی ادمین می‌خواد)، یا تو PowerShell این رو بزن:
-  `powershell -ExecutionPolicy Bypass -File scripts\patch-zed.ps1`
-  از Zed فعلی بک‌آپ می‌گیره و نسخه‌ی درست رو جاش می‌ذاره. با `-Revert` هم
-  برمی‌گردی به حالت اول.
+اگه Zed روی سیستمتون نصبه، می‌توانید با استفاده از Patcher یا اسکریپت PowerShell فایل اجراییش رو اصلاح کنید؛ پس از هر به‌روزرسانی رسمی Zed، لازمه Patcher دوباره اجرا شود؛ چون به‌روزرسانی، فایل اجرایی قبلی رو جایگزین می‌کنه.
 
-**آپدیت رسمی و پچ:** آپدیت خودکار Zed کل `Zed.exe` رو عوض می‌کنه و پچ رو
-پاک می‌کنه. جایگزین کردن یه فایل کوچیک (مثل یه dll) هم **اصلاً ممکن نیست**،
-چون Zed یه exeی تک‌پارچه‌ست و کد رندرینگ متن توی خودش کامپایل شده. دو تا راه
-داری:
-1. یه بار پچ کن و آپدیت خودکار رو خاموش کن (`-DisableAutoUpdate`). تا ابد
-   سر جاش می‌مونه، ولی آپدیت رسمی نمیگیری تا خودت دستی آپدیت کنی.
-2. آپدیت خودکار روشن بمونه و بعد از هر آپدیت یه بار پچر رو دوباره اجرا کنی.
-   همون دابل‌کلیکه، ۵ ثانیه طول می‌کشه، نیازی به نصب دوباره یا دسترسی ادمین
-   نداره. تنظیمات و اکستنشن‌ها دست‌نخورده می‌مونن.
+این پروژه راه‌حلی موقته تا پشتیبانی کامل از متن‌های راست‌به‌چپ مستقیماً به Zed اضافه بشه.
 
-ریپو هر ۶ ساعت یه بار Zed رو چک می‌کنه و برای هر نسخه‌ی جدید بیلد می‌گیره،
-پس پچر همیشه نسخه‌ی متناسب پیدا می‌کنه.
+### مجوز
 
-راه حل واقعی اینه که این پچ توی خود Zed مرج بشه؛ اونوقت هیچ کدوم از اینا
-دیگه لازم نیست.
-
-**برای توسعه‌دهنده:** اگه می‌خوای بدونی پچ دقیقاً چیکار می‌کنه و چرا،
-توضیحاتش رو به شکل کامنت توی خود سورس‌ها گذاشتم:
-`crates/gpui_windows/src/direct_write.rs` (مرتب‌سازی حروف و runها) و
-`crates/gpui/src/text_system/line_layout.rs` (مختصات کرسر). کل تغییر
-`patch/zed-rtl.patch` هست و `patch/direct_write.rs` یه کپی خوانا از شِیپر
-ویندوزِ پچ‌شده.
-
-**لایسنس:** همون لایسنس خود Zed (GPL-3.0).
-
-</div>
+این پروژه تحت مجوز GPL-3.0 منتشر می‌شود. دو بخش اصلاح‌شدهٔ Zed، یعنی `gpui` و `gpui_windows`، در پروژهٔ اصلی تحت مجوز Apache-2.0 قرار دارند. متن کامل مجوزها در فایل‌های `LICENSE` و `LICENSE-APACHE` موجود است.
