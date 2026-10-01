@@ -12,7 +12,7 @@
 [CmdletBinding()]
 param(
     [string]$ZedExe = "",
-    [string]$Tag = "",                            # auto: resolved from each release's build-info.json, falls back to rolling
+    [string]$Tag = "",                            # auto: resolved from each release's build-info.json, falls back to the latest release
     [string]$Asset = "zed-rtl-x86_64.exe",
     [string]$LocalExe = "",                       # use a local build instead of downloading
     [switch]$Revert,
@@ -43,13 +43,14 @@ function Resolve-ReleaseTag {
     try {
         $rels = Invoke-RestMethod -Uri $api -UseBasicParsing -TimeoutSec 30
     } catch {
-        Write-Warning "Could not list releases ($($_.Exception.Message)); using 'rolling'."
-        return "rolling"
+        Write-Warning "Could not list releases ($($_.Exception.Message)); using the latest release."
+        return "latest"
     }
     $wanted = "v$InstalledClean"
     $tagged = $null
-    $rollingOk = $false
+    $latest = $null
     foreach ($rel in $rels) {
+        if (-not $latest) { $latest = $rel.tag_name }
         $info = $rel.assets | Where-Object { $_.name -eq $infoName } | Select-Object -First 1
         if (-not $info) { continue }
         try {
@@ -58,11 +59,7 @@ function Resolve-ReleaseTag {
         if ($json.upstream_ref -ne $wanted) { continue }
         # Wrap in @() so a single match still counts as 1 on PowerShell 5.1.
         $hasAsset = @($rel.assets | Where-Object { $_.name -eq $Asset }).Count -gt 0
-        # Prefer a tagged release; only fall back to the moving "rolling" one.
-        if ($rel.tag_name -eq "rolling") {
-            if ($hasAsset) { $rollingOk = $true }
-            continue
-        }
+        # Prefer a tagged release that carries this exact Zed version.
         if ($hasAsset) { return $rel.tag_name }
         if (-not $tagged) { $tagged = $rel.tag_name }
     }
@@ -70,9 +67,12 @@ function Resolve-ReleaseTag {
         Write-Warning "Found build for $wanted without the $Asset asset; using release $tagged."
         return $tagged
     }
-    if ($rollingOk) { return "rolling" }
-    Write-Warning "No release was built for Zed $wanted; using 'rolling'."
-    return "rolling"
+    if ($latest) {
+        Write-Warning "No release was built for Zed $wanted; using the latest release ($latest)."
+        return $latest
+    }
+    Write-Warning "Could not read any release; defaulting to 'latest'."
+    return "latest"
 }
 
 function Stop-ZedIfRunning {
@@ -129,8 +129,8 @@ if ($LocalExe) {
             $Tag = Resolve-ReleaseTag -InstalledClean $clean -Asset $Asset
             Write-Host "Using release tag: $Tag"
         } else {
-            $Tag = "rolling"
-            Write-Warning "Could not read installed Zed version; defaulting to 'rolling'."
+            $Tag = "latest"
+            Write-Warning "Could not read installed Zed version; defaulting to the latest release."
         }
     }
 
@@ -139,9 +139,10 @@ if ($LocalExe) {
     try {
         Invoke-WebRequest -Uri $url -OutFile $downloaded
     } catch {
-        if ($Tag -ne "rolling") {
-            Write-Warning "No build for tag $Tag; falling back to the 'rolling' release."
-            $Tag = "rolling"
+        Write-Warning "No build for tag $Tag; trying the latest release."
+        $latestTag = (Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing -TimeoutSec 30).tag_name
+        if ($latestTag -and $latestTag -ne $Tag) {
+            $Tag = $latestTag
             $url = "https://github.com/$Repo/releases/download/$Tag/$Asset"
             Write-Host "Downloading $url ..."
             Invoke-WebRequest -Uri $url -OutFile $downloaded
