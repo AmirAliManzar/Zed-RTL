@@ -14,11 +14,11 @@ This patch fixes the problem at the text-shaping layer, so it applies wherever Z
 
 Prebuilt files are available on the [Releases](../../releases) page:
 
-- `zed-rtl-x86_64.exe` — Portable build for 64-bit Intel/AMD systems
-- `zed-rtl-aarch64.exe` — Portable build for Windows on ARM
-- `zed-rtl-patcher-x86_64.exe` — Patcher for x86_64 installations
-- `zed-rtl-patcher-aarch64.exe` — Patcher for ARM64 installations
-- `zed-rtl.patch` — The patch for building Zed yourself
+- `zed-rtl-x86_64.exe` Portable build for 64-bit Intel/AMD systems
+- `zed-rtl-aarch64.exe` Portable build for Windows on ARM
+- `zed-rtl-patcher-x86_64.exe` Patcher for x86_64 installations
+- `zed-rtl-patcher-aarch64.exe` Patcher for ARM64 installations
+- `zed-rtl.patch` The patch for building Zed yourself
 
 The portable builds do not require installation or administrator access. They use your existing Zed configuration from:
 
