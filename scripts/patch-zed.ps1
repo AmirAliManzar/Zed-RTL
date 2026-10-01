@@ -12,7 +12,7 @@
 [CmdletBinding()]
 param(
     [string]$ZedExe = "",
-    [string]$Tag = "",                            # auto: matches installed version, falls back to rolling
+    [string]$Tag = "",                            # auto: resolved from each release's build-info.json, falls back to rolling
     [string]$Asset = "zed-rtl-x86_64.exe",
     [string]$LocalExe = "",                       # use a local build instead of downloading
     [switch]$Revert,
@@ -29,6 +29,50 @@ $ProgressPreference = "SilentlyContinue"
 function Get-InstalledZed {
     if ($ZedExe) { return $ZedExe }
     return Join-Path $env:LOCALAPPDATA "\Programs\Zed\Zed.exe"
+}
+
+# Release names are our own (v0.0.1, v0.0.2...), not Zed's version, so the
+# only reliable way to map an installed Zed to a release is to read the
+# build-info json shipped with each release and compare its upstream_ref.
+function Resolve-ReleaseTag {
+    param([string]$InstalledClean, [string]$Asset)
+    # Each release carries one build-info per architecture.
+    $arch = if ($Asset -match 'aarch64') { 'aarch64' } else { 'x86_64' }
+    $infoName = "build-info-$arch.json"
+    $api = "https://api.github.com/repos/$Repo/releases?per_page=100"
+    try {
+        $rels = Invoke-RestMethod -Uri $api -UseBasicParsing -TimeoutSec 30
+    } catch {
+        Write-Warning "Could not list releases ($($_.Exception.Message)); using 'rolling'."
+        return "rolling"
+    }
+    $wanted = "v$InstalledClean"
+    $tagged = $null
+    $rollingOk = $false
+    foreach ($rel in $rels) {
+        $info = $rel.assets | Where-Object { $_.name -eq $infoName } | Select-Object -First 1
+        if (-not $info) { continue }
+        try {
+            $json = Invoke-RestMethod -Uri $info.browser_download_url -UseBasicParsing -TimeoutSec 30
+        } catch { continue }
+        if ($json.upstream_ref -ne $wanted) { continue }
+        # Wrap in @() so a single match still counts as 1 on PowerShell 5.1.
+        $hasAsset = @($rel.assets | Where-Object { $_.name -eq $Asset }).Count -gt 0
+        # Prefer a tagged release; only fall back to the moving "rolling" one.
+        if ($rel.tag_name -eq "rolling") {
+            if ($hasAsset) { $rollingOk = $true }
+            continue
+        }
+        if ($hasAsset) { return $rel.tag_name }
+        if (-not $tagged) { $tagged = $rel.tag_name }
+    }
+    if ($tagged) {
+        Write-Warning "Found build for $wanted without the $Asset asset; using release $tagged."
+        return $tagged
+    }
+    if ($rollingOk) { return "rolling" }
+    Write-Warning "No release was built for Zed $wanted; using 'rolling'."
+    return "rolling"
 }
 
 function Stop-ZedIfRunning {
@@ -75,15 +119,15 @@ if ($LocalExe) {
     $src = $LocalExe
     Write-Host "Using local build: $src"
 } else {
-    # Resolve which release tag to use: the one matching the installed Zed
-    # (e.g. installed 1.21.0 -> tag "v1.21.0"), falling back to "rolling".
+    # Resolve which release to use by matching the installed Zed version
+    # against the upstream_ref recorded in each release's build-info.json.
     if (-not $Tag) {
         $installedProduct = (Get-Item $Zed).VersionInfo.ProductVersion
         if ($installedProduct) {
-            $clean = ($installedProduct -split '\+')[0]   # 1.21.0+stable... -> 1.21.0
-            $candidate = "v$clean"
-            $Tag = $candidate
-            Write-Host "Installed Zed is $installedProduct -> trying release tag $Tag"
+            $clean = ($installedProduct -split '\+')[0]   # 1.22.0+stable... -> 1.22.0
+            Write-Host "Installed Zed is $installedProduct -> looking for a release built for Zed $clean"
+            $Tag = Resolve-ReleaseTag -InstalledClean $clean -Asset $Asset
+            Write-Host "Using release tag: $Tag"
         } else {
             $Tag = "rolling"
             Write-Warning "Could not read installed Zed version; defaulting to 'rolling'."
