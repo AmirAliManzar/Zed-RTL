@@ -1545,6 +1545,12 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
         glyphrundescription: *const DWRITE_GLYPH_RUN_DESCRIPTION,
         _clientdrawingeffect: windows::core::Ref<windows::core::IUnknown>,
     ) -> windows::core::Result<()> {
+        // DirectWrite calls this once per run, always in logical (typing)
+        // order. For an RTL run the glyph array is therefore backwards for
+        // painting, so it is sorted by descending source index further down.
+        // Run *order* is logical too; the caller fixes that with Unicode bidi
+        // rule L2 once the whole line has been shaped.
+
         let glyphrun = unsafe { &*glyphrun };
         let glyph_count = glyphrun.glyphCount as usize;
         if glyph_count == 0 {

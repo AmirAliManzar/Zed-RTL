@@ -63,26 +63,34 @@ index 780d1a6422..137b270838 100644
                  ],
                  len: 10,
 diff --git a/crates/gpui/src/text_system/line_layout.rs b/crates/gpui/src/text_system/line_layout.rs
-index 7799b36dc8..09576b68db 100644
+index 7799b36dc8..aed730bce1 100644
 --- a/crates/gpui/src/text_system/line_layout.rs
 +++ b/crates/gpui/src/text_system/line_layout.rs
-@@ -36,8 +36,10 @@ pub struct LineLayout {
+@@ -36,8 +36,14 @@ pub struct LineLayout {
  pub struct ShapedRun {
      /// The font id for this run
      pub font_id: FontId,
 -    /// The glyphs that make up this run
 +    /// Glyphs in paint order; for RTL runs this is visual order.
      pub glyphs: Vec<ShapedGlyph>,
-+    /// Run direction, from the shaper's bidi level.
++    /// Run direction, from the shaper's bidi level. The Windows shaper sets it
++    /// from DirectWrite's `bidiLevel`; every other shaper sets it false.
++    /// Storing it matters for a single-glyph RTL run (one Persian letter amid
++    /// English text), which has no descending index to infer the direction
++    /// from.
 +    pub is_rtl: bool,
  }
  
  /// A single glyph, ready to paint.
-@@ -56,41 +58,190 @@ pub struct ShapedGlyph {
+@@ -56,41 +62,194 @@ pub struct ShapedGlyph {
      pub is_emoji: bool,
  }
  
 +/// One caret position: the x for a utf-8 character boundary.
++///
++/// Runs arrive from the shaper in visual order, so an RTL run's glyphs are
++/// stored right-to-left even though its source indices run the other way.
++/// That is why the caret math below cannot assume x rises with the byte index.
 +#[derive(Clone, Copy)]
 +struct CaretStop {
 +    index: usize,
@@ -286,7 +294,7 @@ index 7799b36dc8..09576b68db 100644
          }
  
          if self.len == 1 {
-@@ -106,24 +257,59 @@ impl LineLayout {
+@@ -106,24 +265,59 @@ impl LineLayout {
  
      /// The x position of the character at the given index
      pub fn x_for_index(&self, index: usize) -> Pixels {
@@ -354,7 +362,7 @@ index 7799b36dc8..09576b68db 100644
          }
          None
      }
-@@ -149,6 +335,7 @@ impl LineLayout {
+@@ -149,6 +343,7 @@ impl LineLayout {
                  left_runs.push(ShapedRun {
                      font_id: run.font_id,
                      glyphs: run.glyphs[..split_pos].to_vec(),
@@ -362,7 +370,7 @@ index 7799b36dc8..09576b68db 100644
                  });
              }
  
-@@ -165,6 +352,7 @@ impl LineLayout {
+@@ -165,6 +360,7 @@ impl LineLayout {
                  right_runs.push(ShapedRun {
                      font_id: run.font_id,
                      glyphs: right_glyphs,
@@ -370,7 +378,7 @@ index 7799b36dc8..09576b68db 100644
                  });
              }
          }
-@@ -1091,6 +1279,7 @@ mod tests {
+@@ -1091,6 +1287,7 @@ mod tests {
              runs: vec![ShapedRun {
                  font_id: FontId(0),
                  glyphs,
@@ -378,7 +386,7 @@ index 7799b36dc8..09576b68db 100644
              }],
              len: 0,
          }
-@@ -1104,6 +1293,242 @@ mod tests {
+@@ -1104,6 +1301,242 @@ mod tests {
              .collect()
      }
  
@@ -682,7 +690,7 @@ index 0d04438693..63810c4ea9 100644
              }
          }
 diff --git a/crates/gpui_windows/src/direct_write.rs b/crates/gpui_windows/src/direct_write.rs
-index dfe98a76be..983987c370 100644
+index dfe98a76be..e731983fdc 100644
 --- a/crates/gpui_windows/src/direct_write.rs
 +++ b/crates/gpui_windows/src/direct_write.rs
 @@ -613,6 +613,7 @@ impl DirectWriteState {
@@ -751,7 +759,18 @@ index dfe98a76be..983987c370 100644
      width: f32,
  }
  
-@@ -1505,6 +1550,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1500,11 +1545,21 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+         glyphrundescription: *const DWRITE_GLYPH_RUN_DESCRIPTION,
+         _clientdrawingeffect: windows::core::Ref<windows::core::IUnknown>,
+     ) -> windows::core::Result<()> {
++        // DirectWrite calls this once per run, always in logical (typing)
++        // order. For an RTL run the glyph array is therefore backwards for
++        // painting, so it is sorted by descending source index further down.
++        // Run *order* is logical too; the caller fixes that with Unicode bidi
++        // rule L2 once the whole line has been shaped.
++
+         let glyphrun = unsafe { &*glyphrun };
+         let glyph_count = glyphrun.glyphCount as usize;
          if glyph_count == 0 {
              return Ok(());
          }
@@ -762,7 +781,7 @@ index dfe98a76be..983987c370 100644
          let desc = unsafe { &*glyphrundescription };
          let context = unsafe { &mut *(clientdrawingcontext.cast::<RendererContext>().cast_mut()) };
          let Some(font_face) = glyphrun.fontFace.as_ref() else {
-@@ -1525,10 +1574,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1525,10 +1580,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
              .font_info_cache
              .get(&font_face_key)
              .copied()
@@ -775,7 +794,7 @@ index dfe98a76be..983987c370 100644
                      let font = font_face_to_font(font_face, &self.locale)
                          .ok_or_else(|| Error::new(DWRITE_E_NOFONT, "Failed to create font"))?;
                      let font_id = match context.text_system.font_to_font_id.get(&font) {
-@@ -1581,7 +1630,20 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1581,7 +1636,20 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
          let cluster_analyzer = ClusterAnalyzer::new(cluster_map, glyph_count);
          let mut utf16_idx = desc.textPosition as usize;
          let mut glyph_idx = 0;
@@ -797,7 +816,7 @@ index dfe98a76be..983987c370 100644
          for (cluster_utf16_len, cluster_glyph_count) in cluster_analyzer {
              context.index_converter.advance_to_utf16_ix(utf16_idx);
              utf16_idx += cluster_utf16_len;
-@@ -1594,20 +1656,50 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
+@@ -1594,20 +1662,50 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                  let is_emoji =
                      color_font && is_color_glyph(font_face, id, &context.components.factory);
                  let this_glyph_idx = glyph_idx + cluster_glyph_idx;

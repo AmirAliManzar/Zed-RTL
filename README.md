@@ -33,6 +33,30 @@ version, and swap it in. Useful switches: `-DisableAutoUpdate` so an official
 update doesn't quietly undo the fix, `-Revert` to put the original back, and
 `-ZedExe <path>` to patch a Zed somewhere else.
 
+## Surviving official Zed updates
+
+Zed's auto-updater replaces `Zed.exe` wholesale, so any exe-level fix is erased
+the moment an update lands. There is no smaller file to patch: Zed is a single
+statically-linked exe, the rendering code is compiled into it, and extensions
+run sandboxed and cannot touch text shaping.
+
+Two practical ways to keep the fix:
+
+1. Patch once and turn auto-update off
+   (`patch-zed.ps1 -DisableAutoUpdate`). The fix stays forever, but you stop
+   getting official updates until you update manually and re-patch.
+2. Keep auto-update on and re-run the patcher after each update. It is a
+   double-click, about 5 seconds, no reinstall, no admin rights; it fetches
+   the build matching your new version from Releases. Your settings and
+   extensions are never touched.
+
+The `mirror-upstream` job here polls Zed every 6 hours and rebuilds for each
+new official version, so the patcher always finds a match.
+
+The real fix is upstream: once this lands in `zed-industries/zed`, every
+official build renders Persian/RTL correctly out of the box and none of this
+is needed anymore.
+
 ## Building it yourself
 
 ```powershell
@@ -46,17 +70,12 @@ You need Rust, the MSVC build tools and CMake. The script installs the Rust
 channel Zed pins. Takes about an hour on 4 cores. `UPSTREAM_REF` says which Zed
 version gets patched.
 
-## Docs
-
-- [docs/TECHNICAL.md](docs/TECHNICAL.md), what's actually patched and why
-  (DirectWrite shaping, Unicode bidi L2 reordering, caret stops)
-- [docs/UPDATE_SURVIVAL.md](docs/UPDATE_SURVIVAL.md), keeping the fix when Zed
-  updates itself
-
-`mirror-upstream.yml` polls Zed every 6 hours. When a new release lands it
-bumps `UPSTREAM_REF` and a fresh build follows on its own. If the patch stops
-applying to a newer Zed, the build fails loudly instead of shipping something
-half-patched.
+If you want to read what the patch actually does and why, the explanations live
+as comments in the patched sources themselves:
+`crates/gpui_windows/src/direct_write.rs` (glyph and run reordering) and
+`crates/gpui/src/text_system/line_layout.rs` (caret stops). The whole change is
+`patch/zed-rtl.patch`, and `patch/direct_write.rs` is a readable reference copy
+of the patched Windows shaper.
 
 ## License
 
@@ -96,11 +115,28 @@ Zed توی ویندوز متن فارسی/عربی/عبری رو خراب نشو
   از Zed فعلی بک‌آپ می‌گیره و نسخه‌ی درست رو جاش می‌ذاره. با `-Revert` هم
   برمی‌گردی به حالت اول.
 
-**نکته:** Zed خودش رو آپدیت می‌کنه و با این کار پچ می‌پره. یا
-`"auto_update": false` رو توی `settings.json` خاموش کن، یا موقع پچ کردن
-`-DisableAutoUpdate` بذار. بعد از هر آپدیت رسمی فقط کافیه پچر رو یه بار
-دیگه اجرا کنی. بقیه‌اش رو [docs/UPDATE_SURVIVAL.md](docs/UPDATE_SURVIVAL.md)
-گفتم.
+**آپدیت رسمی و پچ:** آپدیت خودکار Zed کل `Zed.exe` رو عوض می‌کنه و پچ رو
+پاک می‌کنه. جایگزین کردن یه فایل کوچیک (مثل یه dll) هم **اصلاً ممکن نیست**،
+چون Zed یه exeی تک‌پارچه‌ست و کد رندرینگ متن توی خودش کامپایل شده. دو تا راه
+داری:
+1. یه بار پچ کن و آپدیت خودکار رو خاموش کن (`-DisableAutoUpdate`). تا ابد
+   سر جاش می‌مونه، ولی آپدیت رسمی نمیگیری تا خودت دستی آپدیت کنی.
+2. آپدیت خودکار روشن بمونه و بعد از هر آپدیت یه بار پچر رو دوباره اجرا کنی.
+   همون دابل‌کلیکه، ۵ ثانیه طول می‌کشه، نیازی به نصب دوباره یا دسترسی ادمین
+   نداره. تنظیمات و اکستنشن‌ها دست‌نخورده می‌مونن.
+
+ریپو هر ۶ ساعت یه بار Zed رو چک می‌کنه و برای هر نسخه‌ی جدید بیلد می‌گیره،
+پس پچر همیشه نسخه‌ی متناسب پیدا می‌کنه.
+
+راه حل واقعی اینه که این پچ توی خود Zed مرج بشه؛ اونوقت هیچ کدوم از اینا
+دیگه لازم نیست.
+
+**برای توسعه‌دهنده:** اگه می‌خوای بدونی پچ دقیقاً چیکار می‌کنه و چرا،
+توضیحاتش رو به شکل کامنت توی خود سورس‌ها گذاشتم:
+`crates/gpui_windows/src/direct_write.rs` (مرتب‌سازی حروف و runها) و
+`crates/gpui/src/text_system/line_layout.rs` (مختصات کرسر). کل تغییر
+`patch/zed-rtl.patch` هست و `patch/direct_write.rs` یه کپی خوانا از شِیپر
+ویندوزِ پچ‌شده.
 
 **لایسنس:** همون لایسنس خود Zed (GPL-3.0).
 
