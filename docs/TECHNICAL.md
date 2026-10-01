@@ -1,7 +1,7 @@
 # How the fix works (technical)
 
 The bug is entirely inside Zed's Windows text-shaping code:
-`crates/gpui_windows/src/direct_write.rs` — the DirectWrite text renderer
+`crates/gpui_windows/src/direct_write.rs`, the DirectWrite text renderer
 (`IDWriteTextRenderer` implementation).
 
 Everything else (macOS CoreText path, the editor's buffer, etc.) is fine.
@@ -11,16 +11,16 @@ Everything else (macOS CoreText path, the editor's buffer, etc.) is fine.
 ### 1. Glyphs inside an RTL run come back in logical order
 
 When DirectWrite calls `DrawGlyphRun` for a run with an odd `bidiLevel`
-(RTL), the glyph array is returned in **logical** (typing) order — e.g.
-`سلام` arrives as glyphs `س ل ا م`. The original Zed code assigned each
-glyph an increasing x as it arrived, so the word was drawn **mirrored**
+(RTL), the glyph array is returned in **logical** (typing) order. For
+example `سلام` arrives as glyphs `س ل ا م`. The original Zed code assigned
+each glyph an increasing x as it arrived, so the word was drawn **mirrored**
 (letters disconnected/backwards for RTL readers).
 
 **Fix:** collect glyph data into a temporary `Vec<TempGlyph>` that also
 stores each glyph's source index, `advance`, and offsets. After collecting,
 if the run is RTL (`(bidiLevel & 1) == 1`), sort by **descending source
-index** — this is the correct visual (left-to-right) order for a
-right-to-left run — and only then assign positions. The `advanceOffset`
+index**, which is the correct visual (left-to-right) order for a
+right-to-left run, and only then assign positions. The `advanceOffset`
 is negated for RTL runs because, after reversal, offsets that were along
 the leftward advance direction must flip.
 
@@ -33,7 +33,7 @@ A stable `sort_by_key(Reverse(index))` also preserves intra-cluster order
 DirectWrite hands each *run* to `DrawGlyphRun` in **logical order** as well:
 for `سلام خوبی؟` you get `[سلام][space][خوبی؟]`. Laying them out
 left-to-right in that order means a Persian reader (reading right-to-left)
-sees `خوبی؟ سلام` — words in the wrong order.
+sees `خوبی؟ سلام`, words in the wrong order.
 
 **Fix:** during shaping we now record, per run,
 `run_meta: Vec<(bidi_level, start_x, end_x)>`. After the whole line is
@@ -49,10 +49,10 @@ then recompute the runs' x positions left-to-right along the new visual
 order (each glyph is shifted by `new_run_start - old_run_start`).
 
 Properties:
-- **Pure LTR lines** contain no odd level → the block is skipped entirely
-  → **zero behavior change** for English/normal code.
-- **Pure RTL lines** → the whole run sequence is reversed → reads correctly.
-- **Mixed lines** (`hello سلام`, or Persian with embedded English) → only
+- **Pure LTR lines** contain no odd level, so the block is skipped entirely:
+  zero behavior change for English/normal code.
+- **Pure RTL lines**: the whole run sequence is reversed and reads correctly.
+- **Mixed lines** (`hello سلام`, or Persian with embedded English): only
   the RTL segments reverse, embedded LTR content stays in order, nesting
   handled by the descending-level loop.
 
@@ -70,8 +70,9 @@ clicked / which boundary is nearest). All three assumed glyphs are stored in
 RTL runs in **visual** order, so for RTL text the caret stopped moving
 correctly and clicks landed one character off.
 
-**Fix:** `LineLayout` now builds an explicit list of *caret stops* — for every
-character boundary in the line, the x coordinate where the caret belongs:
+**Fix:** `LineLayout` now builds an explicit list of *caret stops*, one for
+every character boundary in the line, holding the x coordinate where the
+caret belongs:
 
 - Runs are stored in visual order and tile the line; each run's *logical*
   span `[start, end)` is derived from the other runs' start indices (no
@@ -83,7 +84,7 @@ character boundary in the line, the x coordinate where the caret belongs:
 - Glyphs that share a source index (a base character + its combining marks,
   or a ligature) are grouped into one **cluster**, and the cluster's left
   edge is the caret boundary. The caret never stops between a base and its
-  marks — matching VS Code.
+  marks, matching VS Code.
 - For an LTR run, a cluster's left edge is the caret position *before* its
   character; for an RTL run it is the caret *after* its character.
 - The two *outer* stops of a run (before its first character, after its
@@ -120,12 +121,12 @@ lone RTL character, and an RTL run carrying a combining mark.
 
 ## Files
 
-- `patch/zed-rtl.patch` — the whole fix, `git diff` against upstream at the
+- `patch/zed-rtl.patch`, the whole fix, `git diff` against upstream at the
   pinned commit (`UPSTREAM_REF`):
   `crates/gpui_windows/src/direct_write.rs` (rendering fixes 1 & 2),
   `crates/gpui/src/text_system/line_layout.rs` (caret fix 3), plus the
   `is_rtl` field additions in `crates/gpui/src/platform.rs`,
   `crates/gpui/src/text_system/line.rs`, `crates/gpui_macos`,
   `crates/gpui_wgpu` and `crates/gpui_web`.
-- `patch/direct_write.rs` — human-readable reference copy of the patched
+- `patch/direct_write.rs`, human-readable reference copy of the patched
   Windows shaper (not used by CI).

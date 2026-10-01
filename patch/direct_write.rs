@@ -625,11 +625,9 @@ impl DirectWriteState {
             let width = px(renderer_context.width);
             let run_meta = renderer_context.run_meta.clone();
 
-            // Unicode bidi rule L2: convert the run sequence from logical
-            // order (as DirectWrite reports it) to visual order whenever RTL
-            // (odd-level) runs are present. Contiguous runs at each level are
-            // reversed, from the highest level down. Purely-LTR lines contain
-            // no odd levels and are left completely untouched.
+            // Unicode bidi rule L2: reverse contiguous runs at each level,
+            // highest first, to get visual order. All-LTR lines have no odd
+            // levels and skip this.
             if run_meta.iter().any(|(lvl, _, _)| *lvl & 1 == 1) && runs.len() > 1 {
                 let max_level = run_meta.iter().map(|(lvl, _, _)| *lvl).max().unwrap();
                 let mut order: Vec<usize> = (0..runs.len()).collect();
@@ -649,8 +647,7 @@ impl DirectWriteState {
                     }
                 }
 
-                // Reassign left-to-right positions along the visual order,
-                // shifting each run's glyphs from their logical placement.
+                // Re-flow glyph x positions in visual order.
                 let mut x = 0.0f32;
                 let mut logical: Vec<Option<ShapedRun>> =
                     runs.drain(..).map(Some).collect();
@@ -1440,7 +1437,7 @@ struct RendererContext<'t, 'a, 'b> {
     components: &'a DirectWriteComponents,
     index_converter: StringIndexConverter<'a>,
     runs: &'b mut Vec<ShapedRun>,
-    /// Per-run metadata captured during shaping: (bidi_level, start_x, end_x).
+    /// (bidi_level, start_x, end_x) per run, for the L2 reorder.
     run_meta: Vec<(u32, f32, f32)>,
     width: f32,
 }
@@ -1634,8 +1631,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
         let mut utf16_idx = desc.textPosition as usize;
         let mut glyph_idx = 0;
 
-        // Temporary storage: collect glyph data first, assign positions after.
-        // This allows us to reverse glyph order for RTL runs.
+        // Collect first, position after, so RTL runs can be reversed.
         struct TempGlyph {
             id: GlyphId,
             index: usize,
@@ -1673,9 +1669,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             glyph_idx += cluster_glyph_count;
         }
 
-        // For RTL runs, DirectWrite returns glyphs in logical order; sort by
-        // descending source index to obtain their visual (left-to-right) order
-        // for painting.
+        // RTL: DirectWrite gives logical order; sort to visual order.
         if is_rtl {
             temp_glyphs.sort_by_key(|t| std::cmp::Reverse(t.index));
         }
@@ -1684,9 +1678,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
         let mut x = run_start_x;
         let mut glyphs: Vec<ShapedGlyph> = Vec::with_capacity(temp_glyphs.len());
         for t in temp_glyphs {
-            // For RTL, negate advance_offset: the original offset was along
-            // the RTL advance direction (leftward), but after reversal we
-            // place glyphs leftward-to-rightward, so the offset must flip.
+            // RTL offsets flip after the reversal.
             let offset_x = if is_rtl { -t.advance_offset } else { t.advance_offset };
             glyphs.push(ShapedGlyph {
                 id: t.id,
@@ -1700,10 +1692,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             x += t.advance;
         }
 
-        // For RTL runs, `glyphs` is now in visual (descending index) order.
-        // Record the direction explicitly so that LineLayout's caret math is
-        // correct even for single-glyph RTL runs (which have no index descent
-        // to infer the direction from).
+        // LineLayout reads is_rtl for its caret math.
         context
             .runs
             .push(ShapedRun { font_id, glyphs, is_rtl });
@@ -1890,9 +1879,6 @@ fn apply_font_features(
     features: &FontFeatures,
 ) -> Result<()> {
     let tag_values = features.tag_value_list();
-    if tag_values.is_empty() {
-        return Ok(());
-    }
 
     // All of these features are enabled by default by DirectWrite.
     // If you want to (and can) peek into the source of DirectWrite

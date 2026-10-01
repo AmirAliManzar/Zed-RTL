@@ -1,37 +1,37 @@
-# Zed RTL — RTL/Persian text fix for Zed on Windows
+# Zed RTL: RTL/Persian text fix for Zed on Windows
 
-Zed on Windows draws right-to-left text broken: letters don't join, words come
-out backwards, and the caret ends up somewhere it shouldn't. This repo is a fix,
-plus Windows builds you can just run.
+Zed on Windows draws right-to-left text broken. Letters don't join, words come
+out backwards, the caret ends up in the wrong place. This repo fixes it and
+ships Windows builds you can just run.
 
-The fix sits in the text-shaping layer, so it covers everywhere Zed draws text —
+The fix is in the text-shaping layer, so it works everywhere Zed draws text:
 editor, terminal pane, remote sessions.
 
 ## Downloads
 
-Everything is on the [releases page](https://github.com/AmirAliManzar/Zed-RTL/releases):
+All of it is on the [releases page](https://github.com/AmirAliManzar/Zed-RTL/releases):
 
-- **`zed-rtl-x86_64.exe`** — portable Zed build, 64-bit Intel/AMD.
-- **`zed-rtl-aarch64.exe`** — same, Windows on ARM.
-- **`zed-rtl-patcher-x86_64.exe`** / **`zed-rtl-patcher-aarch64.exe`** — the
-  one-click patcher (asks for admin, swaps your installed Zed for the fixed one).
-- **`zed-rtl.patch`** — just the patch, if you build Zed yourself.
+- `zed-rtl-x86_64.exe`, portable Zed build, 64-bit Intel/AMD
+- `zed-rtl-aarch64.exe`, same thing for Windows on ARM
+- `zed-rtl-patcher-x86_64.exe` / `zed-rtl-patcher-aarch64.exe`, the one-click
+  patcher (asks for admin, swaps your installed Zed for the fixed one)
+- `zed-rtl.patch`, just the patch, if you build Zed yourself
 
-The Zed builds are portable: no installer, no admin prompt, and they read your
-existing settings from `%APPDATA%\Zed`. Double-click and that's it.
+The Zed builds are portable. No installer, no admin prompt, they read your
+existing settings from `%APPDATA%\Zed`. Double-click and you're in.
 
 ## Replacing your installed Zed
 
-Run the patcher exe above (it pops a UAC prompt), or do it from PowerShell:
+Run the patcher exe above (it pops a UAC prompt), or from PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\patch-zed.ps1
 ```
 
-Either way it backs up your current `Zed.exe`, grabs the build matching your
-installed version, and swaps it in. Handy switches: `-DisableAutoUpdate` (so an
-official update doesn't quietly undo the fix), `-Revert` (put the original back),
-`-ZedExe <path>` (patch a Zed somewhere else).
+Both back up your current `Zed.exe`, download the build matching your installed
+version, and swap it in. Useful switches: `-DisableAutoUpdate` so an official
+update doesn't quietly undo the fix, `-Revert` to put the original back, and
+`-ZedExe <path>` to patch a Zed somewhere else.
 
 ## Building it yourself
 
@@ -42,33 +42,33 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-and-deploy.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build.patched.ps1 -Target aarch64-pc-windows-msvc
 ```
 
-Needs Rust, the MSVC build tools and CMake — the script installs the Rust channel
-Zed pins. Budget roughly an hour on 4 cores. `UPSTREAM_REF` says which Zed
+You need Rust, the MSVC build tools and CMake. The script installs the Rust
+channel Zed pins. Takes about an hour on 4 cores. `UPSTREAM_REF` says which Zed
 version gets patched.
 
 ## Docs
 
-- [docs/TECHNICAL.md](docs/TECHNICAL.md) — what's actually patched and why
-  (DirectWrite shaping, Unicode bidi L2 reordering, caret stops).
-- [docs/UPDATE_SURVIVAL.md](docs/UPDATE_SURVIVAL.md) — keeping the fix when Zed
-  updates itself.
+- [docs/TECHNICAL.md](docs/TECHNICAL.md), what's actually patched and why
+  (DirectWrite shaping, Unicode bidi L2 reordering, caret stops)
+- [docs/UPDATE_SURVIVAL.md](docs/UPDATE_SURVIVAL.md), keeping the fix when Zed
+  updates itself
 
-`mirror-upstream.yml` polls Zed every 6 hours; when a new release lands it bumps
-`UPSTREAM_REF` and a fresh build follows automatically. If the patch stops
-applying to a newer Zed, the build fails loudly rather than shipping something
+`mirror-upstream.yml` polls Zed every 6 hours. When a new release lands it
+bumps `UPSTREAM_REF` and a fresh build follows on its own. If the patch stops
+applying to a newer Zed, the build fails loudly instead of shipping something
 half-patched.
 
 ## License
 
-Same as Zed: **GPL-3.0** — [LICENSE](LICENSE) is copied from Zed itself. The two
+Same as Zed: **GPL-3.0**. [LICENSE](LICENSE) is copied from Zed itself. The two
 crates the patch touches (`gpui`, `gpui_windows`) are Apache-2.0 upstream, see
-[LICENSE-APACHE](LICENSE-APACHE), which is compatible. A downloaded `zed.exe` is
-a modified Zed and carries Zed's own license terms.
+[LICENSE-APACHE](LICENSE-APACHE), which is compatible. A downloaded `zed.exe`
+is a modified Zed and carries Zed's own license terms.
 
 ## Credit
 
 The approach builds on [zed PR #60115](https://github.com/zed-industries/zed/pull/60115).
-The proper home for this fix is upstream — this repo is the stopgap until then.
+The proper home for this fix is upstream. This repo is the stopgap until then.
 
 ---
 
@@ -81,7 +81,7 @@ Zed توی ویندوز متن فارسی/عربی/عبری رو خراب نشو
 هم بیلد آماده‌اش رو داره.
 
 **چیا درست شده:**
-- اتصال حروف — shaping برای فارسی/عربی/عبری
+- اتصال حروف، یعنی shaping درست برای فارسی/عربی/عبری
 - ترتیب کلمات، حتی تو خطوطی که فارسی و انگلیسی قاطی شدن
 - حرکت کرسر و کلیک روی متن فارسی
 - خطوطی که فقط انگلیسی یا عددن، دست‌نخورده موندن
