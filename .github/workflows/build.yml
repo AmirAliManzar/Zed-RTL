@@ -98,7 +98,9 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    if: always()
+    # Only tagged releases are published. A plain push to main just verifies
+    # that the patch still builds; it must never create or touch a release.
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Checkout this repo
@@ -141,23 +143,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          if [ "$tag" = "$GITHUB_REF" ]; then tag="rolling"; fi
           echo "Publishing to release: $tag"
-          if [ "$tag" = "rolling" ]; then
-            notes=$(printf 'Automatic build of main @ %s\nBuilt: %s\nAssets: %s' \
-              "$GITHUB_SHA" "$(date -u +'%Y-%m-%d %H:%M UTC')" "$(ls release-assets | tr '\n' ' ')")
-            if gh release view rolling >/dev/null 2>&1; then
-              gh release edit rolling --notes "$notes"
-            else
-              gh release create rolling --title "Rolling build (auto)" --notes "$notes" --prerelease
-            fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            notes=$(printf 'Refreshed build of %s @ %s\nAssets: %s' "$tag" "$GITHUB_SHA" "$(ls release-assets | tr '\n' ' ')")
+            gh release edit "$tag" --notes "$notes"
           else
-            if gh release view "$tag" >/dev/null 2>&1; then
-              notes=$(printf 'Refreshed build of %s @ %s\nAssets: %s' "$tag" "$GITHUB_SHA" "$(ls release-assets | tr '\n' ' ')")
-              gh release edit "$tag" --notes "$notes"
-            else
-              gh release create "$tag" --verify-tag --generate-notes
-            fi
+            gh release create "$tag" --verify-tag --generate-notes
           fi
           gh release upload "$tag" release-assets/* --clobber
           echo '--- published ---'
