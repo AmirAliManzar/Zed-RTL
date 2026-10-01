@@ -145,7 +145,8 @@ jobs:
             fi
           else
             if gh release view "$tag" >/dev/null 2>&1; then
-              gh release edit "$tag" --generate-notes
+              notes=$(printf 'Refreshed build of %s @ %s\nAssets: %s' "$tag" "$GITHUB_SHA" "$(ls release-assets | tr '\n' ' ')")
+              gh release edit "$tag" --notes "$notes"
             else
               gh release create "$tag" --verify-tag --generate-notes
             fi
