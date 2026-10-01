@@ -140,7 +140,9 @@ jobs:
 
       - name: Publish to GitHub Releases
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Publish as the repo owner, not github-actions[bot], so the
+          # Releases page never shows the bot as the release author.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           echo "Publishing to release: $tag"

@@ -32,7 +32,7 @@ jobs:
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Resolved upstream ref: $ref"
 
-      - name: Update UPSTREAM_REF and trigger a build
+      - name: Update UPSTREAM_REF, tag, and trigger a release build
         env:
           TARGET: ${{ steps.resolve.outputs.ref }}
         run: |
@@ -45,5 +45,10 @@ jobs:
           git config user.email "amiralimanzar@users.noreply.github.com"
           git commit -am "Track upstream $TARGET"
           git push
-          echo "Pushed - the Build workflow will now build $TARGET."
+          # A v* tag is what the Build workflow keys its publish job on, and
+          # what gives the release its name. Without it a main push builds but
+          # never publishes.
+          git tag "$TARGET"
+          git push origin "$TARGET"
+          echo "Pushed tag $TARGET - the Build workflow will now build and publish it."
           echo "NOTE: if the patch no longer applies, the Build workflow fails; refresh patch/zed-rtl.patch."
