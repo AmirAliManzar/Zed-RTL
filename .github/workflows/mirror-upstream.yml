@@ -2,7 +2,7 @@ name: Track upstream
 
 on:
   schedule:
-    - cron: '17 */6 * * *'   # every 6 hours; rebuild soon after each upstream release
+    - cron: '23 */2 * * *'   # every 2 hours; rebuild soon after each upstream release
   workflow_dispatch:
     inputs:
       ref:
