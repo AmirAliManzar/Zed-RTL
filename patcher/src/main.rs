@@ -44,11 +44,44 @@ fn default_asset() -> &'static str {
     }
 }
 
+/// Look for a pre-downloaded build beside the exe or in the working
+/// directory. Lets users hand the 342 MB file to the patcher directly.
+fn find_local_build() -> Option<String> {
+    let names = ["zed-rtl-x86_64.exe", "zed-rtl-aarch64.exe"];
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd);
+    }
+    // Prefer the build matching this patcher's own architecture.
+    let mut ordered: Vec<&str> = Vec::new();
+    ordered.push(default_asset());
+    for n in &names {
+        if !ordered.contains(n) {
+            ordered.push(n);
+        }
+    }
+    for dir in &dirs {
+        for name in &ordered {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                match candidate.to_str() {
+                    Some(s) => return Some(s.to_string()),
+                    None => continue,
+                }
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Default to downloading the build that matches this patcher's arch,
-    // unless the caller overrode -Asset / -LocalExe.
     let has_asset = args
         .iter()
         .any(|a| a.eq_ignore_ascii_case("-Asset") || a.eq_ignore_ascii_case("/Asset"));
@@ -58,6 +91,18 @@ fn main() {
     if !has_asset && !has_local {
         args.push("-Asset".to_string());
         args.push(default_asset().to_string());
+    }
+
+    // The build is 342 MB, so a common workflow is to download it once with a
+    // browser or a download manager and then run the patcher. If a suitable
+    // build sits next to this exe (or in the working directory), use it and
+    // skip the download entirely.
+    if !has_local {
+        if let Some(path) = find_local_build() {
+            println!("Found a build next to the patcher; skipping the download: {path}");
+            args.push("-LocalExe".to_string());
+            args.push(path);
+        }
     }
 
     if !is_admin() {
