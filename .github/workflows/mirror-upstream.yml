@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  issues: write      # so a patch conflict can open an issue instead of failing silently
 
 jobs:
   bump:
@@ -24,6 +25,8 @@ jobs:
         run: |
           ref="${{ inputs.ref }}"
           if [ -z "$ref" ]; then
+            # Stable releases only. Tags like v1.23.0-pre are excluded by the
+            # version regex so we never ship a pre-release as if it were stable.
             ref=$(curl -fsSL 'https://api.github.com/repos/zed-industries/zed/tags?per_page=100' \
               | jq -r '.[].name' \
               | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -32,7 +35,55 @@ jobs:
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Resolved upstream ref: $ref"
 
+      # A new tag starts a ~90 minute build. Only cut it when we already know
+      # the patch applies; otherwise the whole run is wasted and the release
+      # just never appears, with nobody noticing.
+      - name: Verify the patch applies to the new ref
+        id: patchcheck
+        env:
+          TARGET: ${{ steps.resolve.outputs.ref }}
+        run: |
+          current=$(tr -d '[:space:]' < UPSTREAM_REF)
+          if [ -z "$TARGET" ]; then echo "result=notarget" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$current" = "$TARGET" ]; then echo "result=same" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git clone --filter=blob:none --no-checkout --quiet https://github.com/zed-industries/zed.git /tmp/zed
+          git -C /tmp/zed fetch --quiet --depth=1 origin "$TARGET"
+          git -C /tmp/zed checkout --force --quiet "$TARGET"
+          if git -C /tmp/zed apply --check patch/zed-rtl.patch; then
+            echo "Patch applies cleanly to $TARGET"
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "PATCH CONFLICT: the patch no longer applies to $TARGET"
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open an issue when the patch needs a manual refresh
+        if: steps.patchcheck.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TARGET: ${{ steps.resolve.outputs.ref }}
+        run: |
+          # One open issue per conflicting ref, so repeated runs stay quiet.
+          if gh issue list --search "patch conflict $TARGET" --state open | grep -q .; then
+            echo "An issue for $TARGET is already open"; exit 0
+          fi
+          gh issue create \
+            --title "Patch conflicts with Zed $TARGET - manual refresh needed" \
+            --body "The tracker detected Zed **$TARGET** but \`patch/zed-rtl.patch\` no longer applies to it.
+
+          Upstream changed one of the patched files (most likely \`crates/gpui_windows/src/direct_write.rs\`, \`crates/gpui/src/text_system/line.rs\` or \`line_layout.rs\`).
+
+          **What to do**
+          1. Clone upstream at \`$TARGET\`.
+          2. Apply the patch by hand and re-resolve the hunks that conflict.
+          3. Regenerate \`patch/zed-rtl.patch\`.
+          4. Commit it and push a tag \`$TARGET\`.
+
+          Until then, users who upgrade to $TARGET will see the release-1.22.0 build stay in place; the patcher refuses to install a build for a different version."
+          echo "Issue opened"
+
       - name: Update UPSTREAM_REF, tag, and trigger a release build
+        if: steps.patchcheck.outputs.result == 'ok'
         env:
           TARGET: ${{ steps.resolve.outputs.ref }}
         run: |
@@ -51,4 +102,3 @@ jobs:
           git tag "$TARGET"
           git push origin "$TARGET"
           echo "Pushed tag $TARGET - the Build workflow will now build and publish it."
-          echo "NOTE: if the patch no longer applies, the Build workflow fails; refresh patch/zed-rtl.patch."

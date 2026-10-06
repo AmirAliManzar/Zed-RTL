@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write      # needed to publish releases / upload assets
+  issues: write        # so a failed scheduled build can open an issue
 
 concurrency:
   group: build-${{ github.ref }}
@@ -155,3 +156,36 @@ jobs:
           gh release upload "$tag" release-assets/* --clobber
           echo '--- published ---'
           gh release view "$tag" --json assets --jq '.assets[].name'
+
+  # A scheduled build that fails would otherwise go unnoticed: the tracker
+  # keeps pointing at the old version and nobody learns why. Surface it.
+  notify-failure:
+    needs: build
+    runs-on: ubuntu-latest
+    if: failure() && github.event_name != 'pull_request'
+
+    steps:
+      - name: Open an issue about the failed build
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          subject="scheduled build failed"
+          if [ "$tag" != "$GITHUB_REF" ]; then subject="build failed for $tag"; fi
+          # Keep one open issue per subject so retries do not spam.
+          if gh issue list --search "$subject" --state open | grep -q .; then
+            echo "An issue is already open: $subject"; exit 0
+          fi
+          gh issue create \
+            --title "$subject" \
+            --body "The **Build** workflow failed.
+
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Ref: \`$GITHUB_REF\`
+
+          Check the failed step in the run log. Common causes:
+          - The upstream toolchain (\`rust-toolchain.toml\`) changed and a dependency regressed.
+          - A runner image lost a build component (Spectre libs, MSVC).
+
+          The previous release is untouched and still downloadable."
+          echo "Issue opened"
