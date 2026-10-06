@@ -46,14 +46,16 @@ jobs:
           current=$(tr -d '[:space:]' < UPSTREAM_REF)
           if [ -z "$TARGET" ]; then echo "result=notarget" >> "$GITHUB_OUTPUT"; exit 0; fi
           if [ "$current" = "$TARGET" ]; then echo "result=same" >> "$GITHUB_OUTPUT"; exit 0; fi
-          git clone --filter=blob:none --no-checkout --quiet https://github.com/zed-industries/zed.git /tmp/zed
-          git -C /tmp/zed fetch --quiet --depth=1 origin "$TARGET"
-          git -C /tmp/zed checkout --force --quiet "$TARGET"
-          if git -C /tmp/zed apply --check patch/zed-rtl.patch; then
+          # Any failure here (bad ref, network, checkout) must land in the same
+          # "do not tag" bucket as a conflict, never fail the step outright.
+          if git clone --filter=blob:none --no-checkout --quiet https://github.com/zed-industries/zed.git /tmp/zed \
+             && git -C /tmp/zed fetch --quiet --depth=1 origin "$TARGET" \
+             && git -C /tmp/zed checkout --force --quiet "$TARGET" \
+             && git -C /tmp/zed apply --check patch/zed-rtl.patch; then
             echo "Patch applies cleanly to $TARGET"
             echo "result=ok" >> "$GITHUB_OUTPUT"
           else
-            echo "PATCH CONFLICT: the patch no longer applies to $TARGET"
+            echo "Could not verify the patch on $TARGET (conflict or fetch failure)"
             echo "result=conflict" >> "$GITHUB_OUTPUT"
           fi
 
