@@ -19,6 +19,12 @@ jobs:
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
+        # Checkout and push with the PAT, not the default GITHUB_TOKEN.
+        # GitHub never triggers a new workflow run from a push made with
+        # GITHUB_TOKEN (it prevents recursive runs), so the tag would land
+        # and the Build workflow would silently never start.
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Resolve latest upstream release tag
         id: resolve
