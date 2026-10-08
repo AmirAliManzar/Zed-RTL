@@ -266,17 +266,32 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
 $downloaded = Join-Path $CacheDir $Asset
 
+# The installed version is needed both to sanity-check a -LocalExe file and
+# to pick the release, so resolve it before branching on either path.
+$installedProduct = (Get-Item $Zed).VersionInfo.ProductVersion
+$clean = if ($installedProduct) { ($installedProduct -split '\+')[0] } else { "" }
+if ($installedProduct) {
+    Write-Host "Installed Zed is $installedProduct -> looking for a release built for Zed $clean"
+}
+
 if ($LocalExe) {
     if (-not (Test-Path $LocalExe)) { Write-Error "Local build not found: $LocalExe"; exit 1 }
-    $src = $LocalExe
-    Write-Host "Using local build: $src"
-} else {
-    $installedProduct = (Get-Item $Zed).VersionInfo.ProductVersion
-    $clean = if ($installedProduct) { ($installedProduct -split '\+')[0] } else { "" }
-    if ($installedProduct) {
-        Write-Host "Installed Zed is $installedProduct -> looking for a release built for Zed $clean"
+    # A file the user hands us is only usable if it targets the Zed they have.
+    # When it does not, ignore it and fall through to the download path rather
+    # than aborting: a stale downloaded file sitting next to the patcher must
+    # never block patching a freshly updated Zed.
+    $lv = (Get-Item $LocalExe).VersionInfo.ProductVersion
+    $lclean = if ($lv) { ($lv -split '\+')[0] } else { "" }
+    if ($lv -and $clean -and ($lclean -ne $clean)) {
+        Write-Warning "The local file is for Zed $lclean, but you have $clean installed - ignoring it and downloading the matching build."
+        $LocalExe = ""
+    } else {
+        $src = $LocalExe
+        Write-Host "Using local build: $src"
     }
+}
 
+if (-not $LocalExe) {
     if (-not $Tag) {
         if (-not $clean) {
             Write-Warning "Could not read the installed Zed version; defaulting to the latest release."
