@@ -46,12 +46,17 @@ jobs:
           current=$(tr -d '[:space:]' < UPSTREAM_REF)
           if [ -z "$TARGET" ]; then echo "result=notarget" >> "$GITHUB_OUTPUT"; exit 0; fi
           if [ "$current" = "$TARGET" ]; then echo "result=same" >> "$GITHUB_OUTPUT"; exit 0; fi
-          # Any failure here (bad ref, network, checkout) must land in the same
-          # "do not tag" bucket as a conflict, never fail the step outright.
+          # git -C <dir> resolves the patch path relative to <dir>, not the
+          # caller's cwd, so it must be absolute. A relative path always
+          # failed with "can't open patch" and made every new Zed release
+          # look like a patch conflict.
+          PATCH="$GITHUB_WORKSPACE/patch/zed-rtl.patch"
+          if [ ! -f "$PATCH" ]; then PATCH="$PWD/patch/zed-rtl.patch"; fi
+          echo "Using patch file: $PATCH"
           if git clone --filter=blob:none --no-checkout --quiet https://github.com/zed-industries/zed.git /tmp/zed \
              && git -C /tmp/zed fetch --quiet --depth=1 origin "$TARGET" \
              && git -C /tmp/zed checkout --force --quiet "$TARGET" \
-             && git -C /tmp/zed apply --check patch/zed-rtl.patch; then
+             && git -C /tmp/zed apply --check "$PATCH"; then
             echo "Patch applies cleanly to $TARGET"
             echo "result=ok" >> "$GITHUB_OUTPUT"
           else
