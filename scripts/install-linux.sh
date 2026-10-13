@@ -77,13 +77,14 @@ fi
 
 # ---------------------------------------------------------------- resolve
 log "resolving the latest Zed-RTL release..."
-tag=$(gh_get "$api/releases/latest" | json_string tag_name)
+release_json=$(gh_get "$api/releases/latest")
+tag=$(printf '%s' "$release_json" | json_string tag_name)
 if [ -z "$tag" ]; then
     echo "could not resolve the latest release from $api/releases/latest" >&2
     exit 1
 fi
 
-info=$(gh_get "$api/releases/latest" | grep -oP "\"browser_download_url\"\s*:\s*\"\K[^\"]+build-info-linux-$arch\.json")
+info=$(printf '%s' "$release_json" | grep -oP "\"browser_download_url\"\s*:\s*\"\K[^\"]+build-info-linux-$arch\.json")
 if [ -z "$info" ]; then
     echo "no Linux $arch build in release $tag yet." >&2
     echo "Windows-only releases publish until the Linux CI job finishes." >&2
@@ -92,7 +93,7 @@ fi
 build_info=$(gh_get "$info")
 asset_name=$(printf '%s' "$build_info" | json_string artifact)
 asset_sha=$(printf '%s' "$build_info" | json_string sha256)
-asset_url=$(gh_get "$api/releases/latest" | grep -oP "\"browser_download_url\"\s*:\s*\"\K[^\"]+/\Q$asset_name\E")
+asset_url=$(printf '%s' "$release_json" | grep -oP "\"browser_download_url\"\s*:\s*\"\K[^\"]+/\Q$asset_name\E")
 
 if [ -z "$asset_url" ]; then
     echo "asset $asset_name is missing from release $tag" >&2
