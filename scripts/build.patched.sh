@@ -27,35 +27,19 @@ echo "== Zed-RTL build (Linux) =="
 echo "Upstream ref: $upstream_ref"
 echo "Target:       $target"
 
-# ---------------------------------------------------------------- dependencies
-# The list mirrors upstream's script/linux, trimmed to what a release build
-# links against. Skipping this is the usual cause of a failed Linux build on
-# a fresh runner.
-if command -v apt-get >/dev/null 2>&1; then
-    echo "Installing build dependencies..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq \
-        gcc g++ make cmake clang lld llvm \
-        libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev \
-        libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev \
-        libxkbcommon-x11-dev libzstd-dev libsqlite3-dev \
-        jq git curl gettext-base elfutils build-essential \
-        > /dev/null
-    # The C++ standard library revision must match the toolchain. Ubuntu 24.04
-    # needs libstdc++-14-dev; older releases use 12.
-    if grep -qP 'PRETTY_NAME=".+24\.(04|10)' /etc/os-release; then
-        sudo apt-get install -y -qq libstdc++-14-dev > /dev/null || true
-    elif grep -qP 'PRETTY_NAME=".+22\.04' /etc/os-release; then
-        sudo apt-get install -y -qq libstdc++-12-dev > /dev/null || true
-    fi
-fi
-
 # ---------------------------------------------------------------- toolchain
 if ! command -v rustup >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
     source "$HOME/.cargo/env"
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# Match the env upstream's own Linux CI builds with: it compiles C/C++ bits
+# with clang, and the build scripts of some crates assume that.
+export CC=clang
+export CXX=clang++
+export CARGO_TERM_COLOR=always
+export RUST_BACKTRACE=1
 
 # ---------------------------------------------------------------- source
 if [ -z "$work_dir" ]; then
@@ -70,6 +54,27 @@ if [ ! -d "$src_dir/.git" ]; then
 fi
 git -C "$src_dir" fetch --quiet --depth=1 origin "$upstream_ref"
 git -C "$src_dir" checkout --force --quiet "$upstream_ref"
+
+# ---------------------------------------------------------------- dependencies
+# Install exactly what upstream installs, by running its own setup script.
+# Keeping a separate apt list here is how Linux builds silently break when
+# upstream adds a new dependency.
+echo "Installing build dependencies via upstream script/linux..."
+if [ -x "$src_dir/script/linux" ]; then
+    ( cd "$src_dir" && ./script/linux )
+else
+    echo "script/linux missing from upstream; falling back to a static apt list" >&2
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+            gcc g++ make cmake clang lld llvm \
+            libasound2-dev libfontconfig-dev libgit2-dev libglib2.0-dev \
+            libssl-dev libva-dev libvulkan1 libwayland-dev libx11-xcb-dev \
+            libxkbcommon-x11-dev libzstd-dev libsqlite3-dev \
+            jq git curl gettext-base elfutils build-essential \
+            > /dev/null
+    fi
+fi
 
 # Honor the channel pinned by upstream's rust-toolchain.toml so the build
 # works for any UPSTREAM_REF.
