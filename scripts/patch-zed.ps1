@@ -334,6 +334,53 @@ function Install-AutoUpdater {
     }
 }
 
+function Freeze-ZedAutoUpdate {
+    $settings = Join-Path $env:APPDATA "Zed\settings.json"
+    if (-not (Test-Path $settings)) {
+        # No settings file yet: write a minimal one so the freeze sticks.
+        try {
+            '{ "auto_update": false }' | Set-Content -Path $settings -NoNewline
+            Write-Host "Created settings.json with 'auto_update: false'."
+        } catch {
+            Write-Host "No settings.json found; create one with `"auto_update`": false to freeze updates."
+        }
+        return
+    }
+    try {
+        $txt = Get-Content $settings -Raw
+        if ($txt -match '(?m)^[ \t]*"auto_update"[ \t]*:[ \t]*false') {
+            # Already frozen; nothing to write.
+            return
+        }
+        $bakS = "$settings.zedrtl-bak"
+        if (-not (Test-Path $bakS)) { Copy-Item $settings $bakS }
+        if ($txt -match '(?m)^[ \t]*"auto_update"[ \t]*:[ \t]*true') {
+            # Key is there and enabled: flip it in place, leaving the rest of
+            # the file (and its comments) untouched.
+            $txt = $txt -replace '(?m)(^[ \t]*"auto_update"[ \t]*:[ \t]*)true', '$1false'
+        } else {
+            # No key yet: insert one right after the object opens. The file
+            # starts with // comments, so anchor on the first brace that
+            # begins a line rather than on the start of the string.
+            $m = [regex]::Match($txt, '(?m)^[ \t]*\{')
+            if (-not $m.Success) { throw "could not find the opening brace in settings.json" }
+            $at = $m.Index + $m.Length
+            $txt = $txt.Substring(0, $at) + "`n    `"auto_update`": false," + $txt.Substring($at)
+        }
+        Set-Content -Path $settings -Value $txt -NoNewline
+        $check = Get-Content $settings -Raw
+        if ($check -imatch '(?m)^[ \t]*"auto_update"[ \t]*:[ \t]*false') {
+            Write-Host "Set 'auto_update: false' in settings.json (backup at $bakS)."
+            Write-Host "Official Zed updates will no longer silently remove the fix."
+        } else {
+            throw "the write did not produce an auto_update: false entry"
+        }
+    } catch {
+        Write-Warning "Could not edit settings.json automatically: $_"
+        Write-Host "Add this to your settings.json yourself:  `"auto_update`": false"
+    }
+}
+
 # ------------------------------------------------------------- REVERT
 if ($Revert) {
     $zed = Get-InstalledZed
@@ -474,12 +521,13 @@ if (-not $LocalExe) {
             if ($hInstalled -eq $expected) {
                 Write-Host "Zed is already the RTL build for this release - nothing to do."
                 Write-Host "To undo the patch, run again with -Revert."
-                # An install patched before the auto-updater existed (or whose
-                # task was deleted) still needs the background updater. Skip
-                # this in scheduled runs so the task does not rewrite itself
-                # every two hours.
-                if (-not $UpdateIfAvailable) {
-                    Install-AutoUpdater
+                # An install patched before the auto-updater existed still needs
+                # its updates frozen and the background task installed. Skip the
+                # task refresh in scheduled runs so it does not rewrite itself
+                # every two hours; the freeze is cheap and idempotent.
+                if (-not $NoAutoUpdate) {
+                    Freeze-ZedAutoUpdate
+                    if (-not $UpdateIfAvailable) { Install-AutoUpdater }
                 }
                 exit 0
             }
@@ -560,38 +608,11 @@ Copy-Item $src $Zed -Force
 Write-Host "Patched $Zed with the RTL build."
 
 # ------------------------------------------------------------------ settings
-# Freeze Zed's own updater. Without this, Zed phones home to zed.dev and
-# silently replaces the patched build, wiping the RTL fix. On by default;
-# -NoAutoUpdate opts out of the whole scheme (both this and the task below).
+# Freeze Zed's own updater and stand up our background one. Reached both after
+# a fresh patch and - via the early exit above - when the RTL build is already
+# in place, since an install patched by an older patcher never had this done.
 if (-not $NoAutoUpdate) {
-    $settings = Join-Path $env:APPDATA "Zed\settings.json"
-    if (Test-Path $settings) {
-        try {
-            $bakS = "$settings.zedrtl-bak"
-            if (-not (Test-Path $bakS)) { Copy-Item $settings $bakS }
-            $txt = Get-Content $settings -Raw
-            if ($txt -match '"auto_update"\s*:\s*(true|false)') {
-                $txt = $txt -replace '"auto_update"\s*:\s*(true|false)', '"auto_update": false'
-            } else {
-                $txt = $txt -replace '^\s*\{', "{`n    `"auto_update`": false,"
-            }
-            Set-Content -Path $settings -Value $txt -NoNewline
-            Write-Host "Set 'auto_update: false' in settings.json (backup at $bakS)."
-            Write-Host "Official Zed updates will no longer silently remove the fix."
-        } catch {
-            Write-Warning "Could not edit settings.json automatically: $_"
-            Write-Host "Add this to your settings.json yourself:  `"auto_update`": false"
-        }
-    } else {
-        # No settings file yet: write a minimal one so the freeze sticks.
-        try {
-            '{ "auto_update": false }' | Set-Content -Path $settings -NoNewline
-            Write-Host "Created settings.json with 'auto_update: false'."
-        } catch {
-            Write-Host "No settings.json found; create one with `"auto_update`": false to freeze updates."
-        }
-    }
-
+    Freeze-ZedAutoUpdate
     # Install the background task that pulls our releases instead.
     Install-AutoUpdater
 } else {
