@@ -11,7 +11,7 @@ index c03653ed94..e888e3dbe4 100644
          } else {
              position = px(0.);
 diff --git a/crates/gpui/src/text_system/line.rs b/crates/gpui/src/text_system/line.rs
-index 780d1a6422..137b270838 100644
+index f5210052e2..a0093d8aa4 100644
 --- a/crates/gpui/src/text_system/line.rs
 +++ b/crates/gpui/src/text_system/line.rs
 @@ -324,6 +324,7 @@ impl<'a> ShapedLineCursor<'a> {
@@ -22,7 +22,7 @@ index 780d1a6422..137b270838 100644
                  });
              }
              if let Some(glyph) = run.glyphs.get(self.glyph_index) {
-@@ -995,6 +996,7 @@ mod tests {
+@@ -1042,6 +1043,7 @@ mod tests {
                  runs: vec![ShapedRun {
                      font_id: FontId(0),
                      glyphs: shaped_glyphs,
@@ -30,7 +30,7 @@ index 780d1a6422..137b270838 100644
                  }],
                  len: text.len(),
              }),
-@@ -1399,6 +1401,7 @@ mod tests {
+@@ -1508,6 +1510,7 @@ mod tests {
                                  is_emoji: false,
                              },
                          ],
@@ -38,7 +38,7 @@ index 780d1a6422..137b270838 100644
                      },
                      ShapedRun {
                          font_id: FontId(1),
-@@ -1422,6 +1425,7 @@ mod tests {
+@@ -1531,6 +1534,7 @@ mod tests {
                                  is_emoji: false,
                              },
                          ],
@@ -46,7 +46,7 @@ index 780d1a6422..137b270838 100644
                      },
                  ],
                  len: 6,
-@@ -1645,6 +1649,7 @@ mod tests {
+@@ -1754,6 +1758,7 @@ mod tests {
                                  is_emoji: false,
                              },
                          ],
@@ -54,7 +54,7 @@ index 780d1a6422..137b270838 100644
                      },
                      ShapedRun {
                          font_id: FontId(8),
-@@ -1662,6 +1667,7 @@ mod tests {
+@@ -1771,6 +1776,7 @@ mod tests {
                                  is_emoji: false,
                              },
                          ],
@@ -63,7 +63,7 @@ index 780d1a6422..137b270838 100644
                  ],
                  len: 10,
 diff --git a/crates/gpui/src/text_system/line_layout.rs b/crates/gpui/src/text_system/line_layout.rs
-index 7799b36dc8..aed730bce1 100644
+index f0bf121111..26889da9c0 100644
 --- a/crates/gpui/src/text_system/line_layout.rs
 +++ b/crates/gpui/src/text_system/line_layout.rs
 @@ -36,8 +36,14 @@ pub struct LineLayout {
@@ -378,7 +378,7 @@ index 7799b36dc8..aed730bce1 100644
                  });
              }
          }
-@@ -1091,6 +1287,7 @@ mod tests {
+@@ -1092,6 +1288,7 @@ mod tests {
              runs: vec![ShapedRun {
                  font_id: FontId(0),
                  glyphs,
@@ -386,7 +386,7 @@ index 7799b36dc8..aed730bce1 100644
              }],
              len: 0,
          }
-@@ -1104,6 +1301,242 @@ mod tests {
+@@ -1105,6 +1302,242 @@ mod tests {
              .collect()
      }
  
@@ -678,17 +678,246 @@ index 2a190a2489..3612edbaf3 100644
              }
          }
 diff --git a/crates/gpui_wgpu/src/cosmic_text_system.rs b/crates/gpui_wgpu/src/cosmic_text_system.rs
-index 0d04438693..63810c4ea9 100644
+index 0e4e3b11f2..a2d35e8a4b 100644
 --- a/crates/gpui_wgpu/src/cosmic_text_system.rs
 +++ b/crates/gpui_wgpu/src/cosmic_text_system.rs
-@@ -823,6 +823,7 @@ impl CosmicTextSystemState {
-                 runs.push(ShapedRun {
-                     font_id,
-                     glyphs: vec![shaped_glyph],
-+                    is_rtl: false,
-                 });
+@@ -807,6 +807,13 @@ impl CosmicTextSystemState {
+                 continue;
              }
+ 
++            // cosmic-text resolves BiDi per glyph and exposes the level, so the
++            // run direction can be derived instead of assumed. DirectWrite on
++            // Windows splits its glyph runs at direction boundaries; without
++            // this split a single font run here could mix LTR and RTL glyphs and
++            // the caret math would be wrong for both halves.
++            let is_rtl = glyph.level.is_rtl();
++
+             let shaped_glyph = ShapedGlyph {
+                 id: GlyphId(glyph.glyph_id as u32),
+                 position: point(glyph.x.into(), glyph.y.into()),
+@@ -814,19 +821,16 @@ impl CosmicTextSystemState {
+                 is_emoji,
+             };
+ 
+-            if let Some(last_run) = runs
+-                .last_mut()
+-                .filter(|last_run| last_run.font_id == font_id)
+-            {
+-                last_run.glyphs.push(shaped_glyph);
+-            } else {
+-                runs.push(ShapedRun {
+-                    font_id,
+-                    glyphs: vec![shaped_glyph],
+-                });
+-            }
++            Self::group_shaped_glyph(&mut runs, font_id, is_rtl, shaped_glyph);
          }
+ 
++        // cosmic-text lays an RTL paragraph out right-to-left: x descends
++        // across the glyph buffer and the run order is the reverse of the
++        // visual order. The caret code (and DirectWrite on Windows, after its
++        // L2 reorder) expects runs in left-to-right visual order, so reverse
++        // them here. Within each run the glyph order is already visual.
++        Self::order_runs(&mut runs, line.rtl);
++
+         if let Some((sink, missing_glyphs)) = self.missing_glyph_sink.as_ref().zip(missing_glyphs) {
+             sink.report(missing_glyphs);
+         }
+@@ -841,6 +845,41 @@ impl CosmicTextSystemState {
+         }
+     }
+ 
++    /// Appends a shaped glyph to the last run when it shares the glyph's font
++    /// and BiDi direction, otherwise starts a new run. cosmic-text emits one
++    /// visual glyph sequence for the whole line, so runs have to be split here
++    /// at every font *and* direction change; DirectWrite splits at those
++    /// boundaries on its own.
++    fn group_shaped_glyph(
++        runs: &mut Vec<ShapedRun>,
++        font_id: FontId,
++        is_rtl: bool,
++        glyph: ShapedGlyph,
++    ) {
++        if let Some(last_run) = runs
++            .last_mut()
++            .filter(|last_run| last_run.font_id == font_id && last_run.is_rtl == is_rtl)
++        {
++            last_run.glyphs.push(glyph);
++        } else {
++            runs.push(ShapedRun {
++                font_id,
++                glyphs: vec![glyph],
++                is_rtl,
++            });
++        }
++    }
++
++    /// Reorders the run vector into the left-to-right visual order the caret
++    /// code expects. cosmic-text emits an RTL paragraph's glyph buffer in
++    /// right-to-left order (x descends), so the runs come out backwards;
++    /// within each run the glyph order is already visual and is left alone.
++    fn order_runs(runs: &mut Vec<ShapedRun>, paragraph_rtl: bool) {
++        if paragraph_rtl && runs.len() > 1 {
++            runs.reverse();
++        }
++    }
++
+     fn missing_glyphs(
+         &self,
+         text: &str,
+@@ -1795,4 +1834,152 @@ mod tests {
+         let spans = compute_run_spans("anything", 3, 0, primary, &fb, &covers);
+         assert!(spans.is_empty());
+     }
++
++    fn shaped_glyph(index: usize, x: f32) -> ShapedGlyph {
++        ShapedGlyph {
++            id: GlyphId(0),
++            position: point(gpui::px(x), gpui::px(0.)),
++            index,
++            is_emoji: false,
++        }
++    }
++
++    #[test]
++    fn run_grouping_splits_on_direction() {
++        // Same font, BiDi level flips. Without the split one run would mix
++        // directions and the caret math would be wrong for both halves.
++        let mut runs = Vec::new();
++        CosmicTextSystemState::group_shaped_glyph(&mut runs, fid(0), false, shaped_glyph(0, 0.));
++        CosmicTextSystemState::group_shaped_glyph(&mut runs, fid(0), true, shaped_glyph(1, 10.));
++        assert_eq!(runs.len(), 2);
++        assert!(!runs[0].is_rtl);
++        assert_eq!(runs[0].glyphs[0].index, 0);
++        assert!(runs[1].is_rtl);
++        assert_eq!(runs[1].glyphs[0].index, 1);
++    }
++
++    #[test]
++    fn run_grouping_splits_on_font() {
++        // Same direction, different font.
++        let mut runs = Vec::new();
++        CosmicTextSystemState::group_shaped_glyph(&mut runs, fid(0), true, shaped_glyph(0, 0.));
++        CosmicTextSystemState::group_shaped_glyph(&mut runs, fid(1), true, shaped_glyph(1, 10.));
++        assert_eq!(runs.len(), 2);
++        assert_eq!(runs[0].font_id, fid(0));
++        assert_eq!(runs[1].font_id, fid(1));
++    }
++
++    #[test]
++    fn run_grouping_merges_matching_glyphs() {
++        let mut runs = Vec::new();
++        for (index, x) in [(0, 0.), (1, 10.), (2, 20.)] {
++            CosmicTextSystemState::group_shaped_glyph(&mut runs, fid(0), false, shaped_glyph(index, x));
++        }
++        assert_eq!(runs.len(), 1);
++        assert_eq!(
++            runs[0].glyphs.iter().map(|g| g.index).collect::<Vec<_>>(),
++            vec![0, 1, 2]
++        );
++    }
++
++    #[test]
++    fn run_order_reverses_rtl_paragraphs() {
++        let mut runs = vec![
++            ShapedRun { font_id: fid(0), glyphs: vec![shaped_glyph(11, 22.)], is_rtl: false },
++            ShapedRun { font_id: fid(0), glyphs: vec![shaped_glyph(0, 56.)], is_rtl: true },
++        ];
++        CosmicTextSystemState::order_runs(&mut runs, true);
++        assert_eq!(runs.len(), 2);
++        // The runs swapped; each one kept its own glyphs.
++        assert!(runs[0].is_rtl);
++        assert_eq!(runs[0].glyphs[0].index, 0);
++        assert!(!runs[1].is_rtl);
++        assert_eq!(runs[1].glyphs[0].index, 11);
++    }
++
++    #[test]
++    fn run_order_leaves_ltr_paragraphs_alone() {
++        let mut runs = vec![
++            ShapedRun { font_id: fid(0), glyphs: vec![shaped_glyph(0, 0.)], is_rtl: false },
++            ShapedRun { font_id: fid(0), glyphs: vec![shaped_glyph(4, 40.)], is_rtl: true },
++        ];
++        CosmicTextSystemState::order_runs(&mut runs, false);
++        assert_eq!(runs.len(), 2);
++        assert!(!runs[0].is_rtl);
++        assert_eq!(runs[0].glyphs[0].index, 0);
++        assert!(runs[1].is_rtl);
++        assert_eq!(runs[1].glyphs[0].index, 4);
++    }
++
++    #[test]
++    fn run_order_single_run_unchanged() {
++        let mut runs = vec![ShapedRun {
++            font_id: fid(0),
++            glyphs: vec![shaped_glyph(0, 18.)],
++            is_rtl: true,
++        }];
++        CosmicTextSystemState::order_runs(&mut runs, true);
++        assert_eq!(runs.len(), 1);
++    }
++
++    /// End-to-end check of the ordering the caret code consumes. The glyph
++    /// order and x positions below are exactly what cosmic-text 0.19 emits for
++    /// the RTL paragraph "سلام abc" (one font covering both scripts): the
++    /// buffer runs right-to-left, so the RTL run comes first. After grouping
++    /// and ordering the runs must be left-to-right, matching the layout
++    /// DirectWrite produces on Windows after its L2 reorder.
++    #[test]
++    fn rtl_paragraph_runs_end_up_left_to_right() {
++        // (byte index, is_rtl, x) in cosmic-text's visual buffer order.
++        let emitted = [
++            (0, true, 56.6),
++            (2, true, 44.6),
++            (6, true, 37.8),
++            (8, true, 32.2),
++            (11, false, 22.2),
++            (10, false, 11.1),
++            (9, false, 0.0),
++        ];
++
++        let mut runs = Vec::new();
++        for (index, is_rtl, x) in emitted {
++            CosmicTextSystemState::group_shaped_glyph(&mut runs, fid(0), is_rtl, shaped_glyph(index, x));
++        }
++        assert_eq!(runs.len(), 2, "direction change must split the font run");
++        CosmicTextSystemState::order_runs(&mut runs, true);
++
++        // Left-to-right run order: the LTR run is now first and sits left of the
++        // RTL run.
++        let ltr = &runs[0];
++        let rtl = &runs[1];
++        assert!(!ltr.is_rtl);
++        assert!(rtl.is_rtl);
++        let ltr_max = ltr.glyphs.iter().map(|g| g.position.x).max().unwrap();
++        let rtl_min = rtl.glyphs.iter().map(|g| g.position.x).min().unwrap();
++        assert!(ltr_max < rtl_min, "runs must not overlap: {ltr_max} < {rtl_min}");
++
++        // Within the LTR run, ascending index ascends x.
++        let mut ltr_by_index: Vec<_> = ltr
++            .glyphs
++            .iter()
++            .map(|g| (g.index, g.position.x))
++            .collect();
++        ltr_by_index.sort_by_key(|(index, _)| *index);
++        assert!(
++            ltr_by_index.windows(2).all(|w| w[0].1 <= w[1].1),
++            "LTR run x must ascend with index: {ltr_by_index:?}"
++        );
++
++        // Within the RTL run, ascending index descends x.
++        let rtl_by_index = {
++            let mut v = rtl
++                .glyphs
++                .iter()
++                .map(|g| (g.index, g.position.x))
++                .collect::<Vec<_>>();
++            v.sort_by_key(|(index, _)| *index);
++            v
++        };
++        assert!(rtl_by_index.windows(2).all(|w| w[0].1 > w[1].1), "RTL run x must descend: {rtl_by_index:?}");
++    }
+ }
 diff --git a/crates/gpui_windows/src/direct_write.rs b/crates/gpui_windows/src/direct_write.rs
 index dfe98a76be..e731983fdc 100644
 --- a/crates/gpui_windows/src/direct_write.rs

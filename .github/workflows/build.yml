@@ -41,6 +41,17 @@ jobs:
             artifact: zed-rtl-aarch64.exe
             patcher: zed-rtl-patcher-aarch64.exe
             best_effort: 'true'
+          # Linux x64. Also best-effort: a Linux failure must never block the
+          # Windows assets, which are what most users install.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: zed-rtl-linux-x86_64.tar.gz
+            best_effort: 'true'
+          # Linux on ARM, on a native ARM runner (no cross toolchain needed).
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: zed-rtl-linux-aarch64.tar.gz
+            best_effort: 'true'
 
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -58,7 +69,8 @@ jobs:
           key: cargo-${{ matrix.target }}-${{ matrix.os }}-v3
           restore-keys: cargo-${{ matrix.target }}-${{ matrix.os }}-v3
 
-      - name: Build patched Zed
+      - name: Build patched Zed (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: ${{ matrix.best_effort == 'true' }}
         run: |
@@ -70,9 +82,20 @@ jobs:
           if ("${{ github.event.inputs.upstream_ref }}") { $buildArgs += "-UpstreamRef", "${{ github.event.inputs.upstream_ref }}" }
           & Powershell -ExecutionPolicy Bypass -File @buildArgs
 
+      - name: Build patched Zed (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: ${{ matrix.best_effort == 'true' }}
+        run: |
+          UPSTREAM_REF="${{ github.event.inputs.upstream_ref }}" \
+          TARGET="${{ matrix.target }}" \
+          ARTIFACT_NAME="${{ matrix.artifact }}" \
+          ./scripts/build.patched.sh
+
       # Tiny dependency-free crate; builds in seconds for the same target and
-      # ends up next to the Zed build in artifacts/.
+      # ends up next to the Zed build in artifacts/. Windows-only: the patcher
+      # is a UAC self-elevating .exe, so there is nothing to build on Linux.
       - name: Build the patcher exe
+        if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: ${{ matrix.best_effort == 'true' }}
         run: |
@@ -116,7 +139,7 @@ jobs:
         run: |
           set -e
           mkdir -p release-assets
-          # x64: prefer the windows-2022 build, fall back to the 2025 one.
+          # Windows x64: prefer the windows-2022 build, fall back to the 2025 one.
           if ls dl/out-x86_64-pc-windows-msvc-windows-2022/*.exe >/dev/null 2>&1; then
             cp -f dl/out-x86_64-pc-windows-msvc-windows-2022/*.exe release-assets/
             cp -f dl/out-x86_64-pc-windows-msvc-windows-2022/build-info.json release-assets/build-info-x86_64.json
@@ -128,13 +151,22 @@ jobs:
           # build-info records which upstream Zed version each build is for.
           # The patcher reads it to pick the right release for an install.
           cp -f dl/out-aarch64-pc-windows-msvc-windows-11-arm/build-info.json release-assets/build-info-aarch64.json 2>/dev/null || true
+          # Linux: a tarball with bin/zed inside, mirroring upstream's layout.
+          # Separate build-info names so the Windows patcher never picks one up.
+          for arch in x86_64 aarch64; do
+            dir=$(ls -d dl/out-${arch}-unknown-linux-gnu-* 2>/dev/null | head -1 || true)
+            if [ -n "$dir" ]; then
+              cp -f "$dir"/*.tar.gz release-assets/ 2>/dev/null || true
+              cp -f "$dir"/build-info.json "release-assets/build-info-linux-${arch}.json" 2>/dev/null || true
+            fi
+          done
           # The patch itself, for anyone who builds Zed themselves.
           cp -f patch/zed-rtl.patch release-assets/zed-rtl.patch
           echo '--- assets ---'
           ls -la release-assets
           echo '--- sha256 ---'
           cd release-assets
-          for f in *.exe *.patch; do
+          for f in *.exe *.tar.gz *.patch; do
             [ -f "$f" ] || continue
             sha256sum "$f" | tee "$f.sha256"
           done
@@ -185,7 +217,7 @@ jobs:
 
           Check the failed step in the run log. Common causes:
           - The upstream toolchain (\`rust-toolchain.toml\`) changed and a dependency regressed.
-          - A runner image lost a build component (Spectre libs, MSVC).
+          - A runner image lost a build component (Spectre libs, MSVC, Linux dev packages).
 
           The previous release is untouched and still downloadable."
           echo "Issue opened"
