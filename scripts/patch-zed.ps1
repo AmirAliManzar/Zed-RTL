@@ -23,7 +23,7 @@
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File patch-zed.ps1
-    powershell -ExecutionPolicy Bypass -File patch-zed.ps1 -DisableAutoUpdate
+    powershell -ExecutionPolicy Bypass -File patch-zed.ps1 -NoAutoUpdate
     powershell -ExecutionPolicy Bypass -File patch-zed.ps1 -LocalExe C:\Downloads\zed-rtl-x86_64.exe
     powershell -ExecutionPolicy Bypass -File patch-zed.ps1 -Revert
 #>
@@ -34,11 +34,12 @@ param(
     [string]$Asset = "zed-rtl-x86_64.exe",
     [string]$LocalExe = "",                       # use an already-downloaded build
     [switch]$Revert,
-    [switch]$DisableAutoUpdate,
+    [switch]$NoAutoUpdate,                         # opt out of freezing Zed's updater AND our task
     [switch]$VerifyOnly,
     [switch]$Force,
     [switch]$Silent,
     [switch]$AllowAny,
+    [switch]$UpdateIfAvailable,                    # (internal) check GitHub and update only if newer
     [int]$Retries = 3
 )
 $ErrorActionPreference = "Stop"
@@ -229,6 +230,13 @@ function Invoke-DownloadWithProgress {
 function Stop-ZedIfRunning {
     $procs = Get-Process -Name "zed" -ErrorAction SilentlyContinue
     if ($procs) {
+        if ($DeferIfRunning) {
+            # Background auto-update: never force-close the editor and risk
+            # losing unsaved work. The build is already downloaded and cached,
+            # so the next scheduled run swaps it in once Zed has been closed.
+            Write-Output ("{0}: Zed is running; the update is cached and will be installed once Zed is closed." -f (Get-Date -Format "s"))
+            exit 0
+        }
         if (-not ($Force -or $Silent)) {
             Write-Warning "Zed is running and will be force-closed. Unsaved changes could be lost."
             Read-Host "Press Enter to continue, or Ctrl+C to abort"
@@ -238,11 +246,112 @@ function Stop-ZedIfRunning {
     }
 }
 
-# ------------------------------------------------------------------ REVERT
+# ------------------------------------------------------ auto-updater
+# Zed's own auto-updater pulls from zed.dev and would silently replace the
+# patched build. We turn that off and instead poll our own releases: the
+# scheduled task runs this script with -UpdateIfAvailable, which only swaps
+# in a newer release when one exists for the installed Zed version.
+
+$DeferIfRunning = $false
+
+# Bare major.minor.patch compare (-1 / 0 / 1). Splits on . - + so a build
+# like "1.23.2+dev.30" or a tag like "v1.24.0" both reduce to three numbers;
+# string comparison alone would call 1.10.0 older than 1.9.0.
+function Compare-Semver {
+    param([string]$A, [string]$B)
+    $aa = (($A -replace '^v', '') -split '[\.\-+]')[0..2]
+    $bb = (($B -replace '^v', '') -split '[\.\-+]')[0..2]
+    for ($i = 0; $i -lt 3; $i++) {
+        $x = 0; $y = 0
+        if ($i -lt $aa.Count) { [int]::TryParse($aa[$i], [ref]$x) | Out-Null }
+        if ($i -lt $bb.Count) { [int]::TryParse($bb[$i], [ref]$y) | Out-Null }
+        if ($x -lt $y) { return -1 }
+        if ($x -gt $y) { return 1 }
+    }
+    return 0
+}
+
+$ZedRtlDir = Join-Path $env:ProgramFiles "Zed-RTL"
+$TaskName = "Zed-RTL-AutoUpdate"
+
+function Get-LatestReleaseInfo {
+    param([string]$Asset)
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing -TimeoutSec 30
+        $arch = if ($Asset -match 'aarch64') { 'aarch64' } else { 'x86_64' }
+        $info = $rel.assets | Where-Object { $_.name -eq "build-info-$arch.json" } | Select-Object -First 1
+        if ($info) {
+            $j = Invoke-RestMethod -Uri $info.browser_download_url -UseBasicParsing -TimeoutSec 30
+            return @{ tag = $rel.tag_name; upstream = $j.upstream_ref }
+        }
+    } catch { }
+    return $null
+}
+
+function Install-AutoUpdater {
+    try {
+        New-Item -ItemType Directory -Force -Path $ZedRtlDir | Out-Null
+        $scriptCopy = Join-Path $ZedRtlDir "patch-zed.ps1"
+        Copy-Item $PSCommandPath $scriptCopy -Force
+    } catch {
+        Write-Warning "Could not install the auto-updater (need administrator): $($_.Exception.Message)"
+        Write-Host "Re-run the patcher as administrator to enable background updates."
+        return
+    }
+
+    # schtasks.exe strips every double quote from /TR, which turns "C:\Program
+    # Files\..." into a broken command; the ScheduledTasks cmdlet keeps them.
+    # Output goes through cmd.exe so the log redirect is honoured.
+    $log = Join-Path $ZedRtlDir "autoupdate.log"
+    $psArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -UpdateIfAvailable -Silent -Force' -f $scriptCopy
+    $cmd = '/c powershell.exe {0} >> "{1}" 2>&1' -f $psArgs, $log
+
+    $ok = $false
+    if (Get-Module -ListAvailable -Name ScheduledTasks) {
+        try {
+            $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $cmd
+            # -Once with an open-ended repetition is the reliable way to say
+            # "every 2 hours, forever" on PowerShell 5.1.
+            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(1) `
+                -RepetitionInterval (New-TimeSpan -Hours 2) `
+                -RepetitionDuration (New-TimeSpan -Days 9999)
+            $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+            Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+                -RunLevel Highest -Settings $settings -Force | Out-Null
+            $ok = $true
+        } catch {
+            Write-Warning "Register-ScheduledTask failed ($($_.Exception.Message)); falling back to schtasks."
+        }
+    }
+    if (-not $ok) {
+        schtasks /Create /TN $TaskName /TR "cmd.exe $cmd" /SC HOURLY /MO 2 /RL HIGHEST /F | Out-Null
+        $ok = ($LASTEXITCODE -eq 0)
+    }
+    if ($ok) {
+        Write-Host "Auto-update installed: a background task checks our GitHub releases every 2 hours."
+    } else {
+        Write-Warning "Could not create the scheduled task."
+    }
+}
+
+# ------------------------------------------------------------- REVERT
 if ($Revert) {
     $zed = Get-InstalledZed
     $bak = "$zed.bak"
     if (-not (Test-Path $bak)) { Write-Error "No backup found at $bak - nothing to revert."; exit 1 }
+    # Tear down the background updater first, otherwise the scheduled task
+    # would re-patch Zed again on its next run.
+    schtasks /Delete /TN $TaskName /F 2>$null | Out-Null
+    $stillThere = $null
+    try { $stillThere = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch { }
+    if ($stillThere) {
+        Write-Warning "The auto-update task could not be removed (need administrator)."
+        Write-Host "Run the patcher as administrator with -Revert, or delete the scheduled"
+        Write-Host "task '$TaskName' by hand, or it will re-patch Zed on its next run."
+    }
+    if (Test-Path $ZedRtlDir) {
+        Remove-Item $ZedRtlDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Stop-ZedIfRunning
     Move-Item $bak $zed -Force
     $settings = Join-Path $env:APPDATA "Zed\settings.json.zedrtl-bak"
@@ -255,10 +364,45 @@ if ($Revert) {
 }
 
 # ------------------------------------------------------------------ detect
+# Resolved before anything else: both the auto-update check and the download
+# path need to know which Zed.exe is installed.
 $Zed = Get-InstalledZed
 if (-not (Test-Path $Zed)) {
     Write-Error "Installed Zed not found at $Zed`nPass -ZedExe <full path to Zed.exe>."
     exit 1
+}
+
+# ------------------------------------------------- UpdateIfAvailable mode
+# Invoked by the scheduled task. Behaves like a normal silent run, except:
+#   - a newer Zed release than the one installed triggers an upgrade,
+#   - an older/missing build is not an error, and
+#   - Zed is never force-closed to make the swap happen.
+if ($UpdateIfAvailable) {
+    $Silent = $true
+    $Force = $true
+    $DeferIfRunning = $true
+    $installedProduct = (Get-Item $Zed).VersionInfo.ProductVersion
+    $clean = if ($installedProduct) { ($installedProduct -split '\+')[0] } else { "" }
+    if ($clean) {
+        $latest = Get-LatestReleaseInfo -Asset $Asset
+        if (-not $latest) {
+            Write-Output ("{0}: could not reach GitHub to check for updates." -f (Get-Date -Format "s"))
+            exit 0
+        }
+        $cmp = Compare-Semver $latest.upstream $clean
+        if ($cmp -lt 0) {
+            # Our newest build targets an older Zed than the installed one.
+            # Wait for CI to publish a matching build instead of downgrading.
+            Write-Output ("{0}: installed Zed {1} is newer than our latest build ({2}) - waiting for a matching release." -f (Get-Date -Format "s"), $clean, $latest.upstream)
+            exit 0
+        }
+        if ($cmp -gt 0) {
+            Write-Output ("{0}: upgrading Zed {1} to {2} (release {3})." -f (Get-Date -Format "s"), $clean, $latest.upstream, $latest.tag)
+            $Tag = $latest.tag
+        }
+        # $cmp -eq 0: fall through. The normal path patches an unpatched
+        # install and exits 0 when the RTL build is already in place.
+    }
 }
 
 $tmp = Join-Path $env:TEMP "zed-rtl-patcher"
@@ -303,7 +447,7 @@ if (-not $LocalExe) {
                 # downgrade a newer Zed. Say clearly what happened instead.
                 Write-Host ""
                 Write-Host "No RTL build for Zed $clean has been published yet." -ForegroundColor Yellow
-                Write-Host "The tracker workflow checks for a new Zed release every 6 hours and"
+                Write-Host "The tracker workflow checks for a new Zed release every 2 hours and"
                 Write-Host "publishes a matching build automatically, so this usually resolves"
                 Write-Host "itself within a few hours of the upstream release."
                 Write-Host ""
@@ -330,6 +474,13 @@ if (-not $LocalExe) {
             if ($hInstalled -eq $expected) {
                 Write-Host "Zed is already the RTL build for this release - nothing to do."
                 Write-Host "To undo the patch, run again with -Revert."
+                # An install patched before the auto-updater existed (or whose
+                # task was deleted) still needs the background updater. Skip
+                # this in scheduled runs so the task does not rewrite itself
+                # every two hours.
+                if (-not $UpdateIfAvailable) {
+                    Install-AutoUpdater
+                }
                 exit 0
             }
         } catch { }
@@ -409,7 +560,10 @@ Copy-Item $src $Zed -Force
 Write-Host "Patched $Zed with the RTL build."
 
 # ------------------------------------------------------------------ settings
-if ($DisableAutoUpdate) {
+# Freeze Zed's own updater. Without this, Zed phones home to zed.dev and
+# silently replaces the patched build, wiping the RTL fix. On by default;
+# -NoAutoUpdate opts out of the whole scheme (both this and the task below).
+if (-not $NoAutoUpdate) {
     $settings = Join-Path $env:APPDATA "Zed\settings.json"
     if (Test-Path $settings) {
         try {
@@ -429,9 +583,26 @@ if ($DisableAutoUpdate) {
             Write-Host "Add this to your settings.json yourself:  `"auto_update`": false"
         }
     } else {
-        Write-Host "No settings.json found; create one containing { `"auto_update`": false } to freeze updates."
+        # No settings file yet: write a minimal one so the freeze sticks.
+        try {
+            '{ "auto_update": false }' | Set-Content -Path $settings -NoNewline
+            Write-Host "Created settings.json with 'auto_update: false'."
+        } catch {
+            Write-Host "No settings.json found; create one with `"auto_update`": false to freeze updates."
+        }
     }
+
+    # Install the background task that pulls our releases instead.
+    Install-AutoUpdater
+} else {
+    # The user opted out; remove any task a previous run created.
+    schtasks /Delete /TN $TaskName /F 2>$null | Out-Null
 }
 
 Write-Host ""
-Write-Host "Done. If something looks wrong, revert with:  patch-zed.ps1 -Revert"
+if (-not $NoAutoUpdate) {
+    Write-Host "Done. Zed now updates from github.com/$Repo instead of zed.dev."
+} else {
+    Write-Host "Done. Auto-update was left disabled."
+}
+Write-Host "If something looks wrong, revert with:  patch-zed.ps1 -Revert"

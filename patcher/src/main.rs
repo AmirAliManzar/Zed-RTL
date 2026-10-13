@@ -135,9 +135,14 @@ fn main() {
     }
 
     println!("Running as administrator.");
-    let script = std::env::temp_dir().join("zed-rtl-patcher\\patch-zed.ps1");
+    // Extract to a persistent location, not the temp dir: the auto-updater
+    // schedules this exact path, so the script has to survive reboots.
+    let base = std::env::var("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let script = base.join("Zed-RTL").join("patch-zed.ps1");
     if let Err(e) = std::fs::create_dir_all(script.parent().unwrap()) {
-        panic!("cannot create temp dir: {e}");
+        panic!("cannot create {}: {e}", script.parent().unwrap().display());
     }
     if let Err(e) = std::fs::write(&script, PS1) {
         panic!("cannot write patch script to {}: {e}", script.display());
