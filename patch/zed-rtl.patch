@@ -629,10 +629,10 @@ index f0bf121111..26889da9c0 100644
      #[test]
      fn test_force_width_latin_unchanged() {
          let cell_width = px(8.);
-diff --git a/crates/gpui_macos/src/text_system.rs b/crates/gpui_macos/src/text_system.rs
+diff --git a/crates/gpui_apple/src/text_system.rs b/crates/gpui_apple/src/text_system.rs
 index fbc48864ce..9605b766a1 100644
---- a/crates/gpui_macos/src/text_system.rs
-+++ b/crates/gpui_macos/src/text_system.rs
+--- a/crates/gpui_apple/src/text_system.rs
++++ b/crates/gpui_apple/src/text_system.rs
 @@ -592,6 +592,7 @@ impl MacTextSystemState {
                      runs.push(ShapedRun {
                          font_id,
